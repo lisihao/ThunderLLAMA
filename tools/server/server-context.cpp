@@ -2103,9 +2103,19 @@ private:
             }
         }
 
+        if (batch.n_tokens > 0) {
+            SRV_DBG("decode-first: %d decode tokens batched before prefill\n", batch.n_tokens);
+        }
+
         // process in chunks of params.n_batch
         int32_t n_batch  = llama_n_batch(ctx);
         int32_t n_ubatch = llama_n_ubatch(ctx);
+
+        // adaptive chunk prefill: limit tokens per slot per iteration to allow decode interleaving
+        const char * chunk_env = getenv("THUNDERLLAMA_CHUNK_PREFILL");
+        const int32_t n_chunk_prefill = chunk_env
+            ? atoi(chunk_env)
+            : std::max(32, n_batch / std::max(1, (int32_t)slots.size()));
 
         float  alora_scale       = -1.0f;
         size_t alora_disabled_id = 0;
@@ -2488,7 +2498,8 @@ private:
                             );
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
+                    int32_t tokens_from_slot = 0;
+                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch && tokens_from_slot < n_chunk_prefill) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -2512,6 +2523,7 @@ private:
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
+                        tokens_from_slot++;
 
                         // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
                         const int n_last = std::min(n_batch, 512);
