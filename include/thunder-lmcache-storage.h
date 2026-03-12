@@ -45,6 +45,7 @@ public:
      * @param cpu_limit_bytes   Maximum bytes for L2 CPU heap storage (default 8GB).
      * @param disk_limit_bytes  Maximum bytes for L3 disk mmap storage (default 32GB).
      * @param disk_path         Path to disk cache file (default ~/.cache/thunderllama/kv_cache.bin).
+     *                          Can be overridden by environment variable THUNDER_LMCACHE_DISK_PATH.
      *                          Tilde (~) is expanded to user's home directory.
      *
      * @throws std::runtime_error if disk_path cannot be created or opened.

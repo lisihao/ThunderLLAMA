@@ -21,8 +21,12 @@ ThunderChunkStorage::ThunderChunkStorage(
 )
     : l2_limit_bytes_(cpu_limit_bytes),
       l3_limit_bytes_(disk_limit_bytes),
-      disk_path_(expand_tilde(disk_path))
+      disk_path_([&disk_path]() {
+          const char * env_path = getenv("THUNDER_LMCACHE_DISK_PATH");
+          return expand_tilde(env_path ? env_path : disk_path);
+      }())
 {
+    fprintf(stderr, "[ThunderChunkStorage] Using disk path: %s\n", disk_path_.c_str());
     // Create parent directory if not exists
     size_t last_slash = disk_path_.rfind('/');
     if (last_slash != std::string::npos) {
