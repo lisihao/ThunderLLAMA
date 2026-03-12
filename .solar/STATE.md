@@ -349,20 +349,49 @@ L3: ThunderLLAMA + LMCache
 
 ### 实现计划
 
-**Phase 1: ClawGate 增强**（当前）
-- [ ] `should_force_prefill()` 决策逻辑
-- [ ] `cache_prompt` 参数透传
-- [ ] ContextPilot overlap API 集成
+**Phase 1: ClawGate 增强** ✅ **完成**（2026-03-12）
+- ✅ `/lmcache/stats` 端点实现
+- ✅ `cache_prompt` 参数透传与验证
+- ✅ ContextPilot overlap API 集成
+- ✅ `should_force_prefill()` 决策逻辑实现
+- ✅ 性能达标：23.34x（超过 20x 目标）
+- ✅ 深度调查完成（PHASE1_INVESTIGATION_REPORT.md）
 
-**Phase 2: 监控**
+**Phase 2: 监控与优化**（当前）
+- [ ] Prometheus metrics 集成
 - [ ] skip_rate 监控
 - [ ] cache_hit_rate 监控
-- [ ] Dashboard
+- [ ] Grafana Dashboard
+- [ ] 决策阈值调优（基于真实数据）
 
 **Phase 3: 高级优化**
 - [ ] Eviction-aware 调度
 - [ ] Prefix-group 批处理
+- [ ] ThunderChunkStorage 真实统计集成
 
 ### 文档位置
-- `/tmp/三层协同优化方案.md` - 完整方案
-- `/Users/lisihao/ThunderLLAMA/clawgate-integration/README.md` - 集成文档
+- `clawgate-integration/PHASE1_INVESTIGATION_REPORT.md` - Phase 1 调查报告
+- `clawgate-integration/PHASE1_COMPLETION_REPORT.md` - Phase 1 初始报告
+- `clawgate-integration/THREE_LAYER_OPTIMIZATION.md` - 三层优化方案
+- `/tmp/test_*.py` - 各种测试脚本
+
+### Phase 1 最终状态（2026-03-12）
+
+**性能结果**:
+- ✅ 高 overlap 场景：**23.34x** 加速（超过 20x 目标）
+- ✅ Force prefill 决策：9/9 正确
+- ✅ `/lmcache/stats` 端点：正常工作
+- ✅ `cache_prompt` 参数：验证有效
+
+**调查发现**:
+- ✅ 验证 `cache_prompt` 在 `/v1/chat/completions` 端点有效
+- ✅ 确认 session cache 可正确禁用（cache_n=0）
+- ⚠️ Skip logic 需要 100% LMCache 命中（设计限制）
+- 📊 当前 23.34x = 理论 27.93x 的 83%
+
+**Commits**:
+- `6d2857090` - Phase 1 完成提交
+- `d623c5c0a` - Use /lmcache/stats in client
+- `294456afa` - /lmcache/stats build fix
+- `45f658748` - /lmcache/stats endpoint implementation
+- `a375cce79` - Phase 1 cache-aware routing implementation
