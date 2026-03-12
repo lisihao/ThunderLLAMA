@@ -56,28 +56,19 @@ class LMCacheStatsClient:
             Future: Will query /lmcache/stats endpoint when available
         """
         try:
-            # TODO: Implement /lmcache/stats endpoint in ThunderLLAMA
-            # For now, use heuristic based on slots activity
-
-            resp = await self.client.get(f"{self.base_url}/slots")
+            # Query /lmcache/stats endpoint
+            resp = await self.client.get(f"{self.base_url}/lmcache/stats")
             if resp.status_code != 200:
-                logger.warning(f"Failed to query slots: {resp.status_code}")
+                logger.warning(f"Failed to query /lmcache/stats: {resp.status_code}")
                 return 0.5  # Default: medium hit rate
 
-            slots = resp.json()
+            stats = resp.json()
 
-            # Heuristic: If slots are idle, assume cache is warm
-            active_slots = [s for s in slots if s.get("is_processing")]
+            # Extract hit rate from response
+            hit_rate = stats.get("l2_hit_rate", 0.5)
 
-            if len(active_slots) == 0:
-                # No active requests → cache likely warm
-                return 0.9
-            elif len(active_slots) >= len(slots) // 2:
-                # Many active requests → cache might be cold
-                return 0.5
-            else:
-                # Some activity → medium hit rate
-                return 0.7
+            logger.debug(f"LMCache hit rate: {hit_rate:.2f}")
+            return hit_rate
 
         except Exception as e:
             logger.warning(f"Error querying LMCache stats: {e}")
