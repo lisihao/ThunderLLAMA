@@ -12,6 +12,10 @@
 #include <map>
 #include <vector>
 
+// Thunder LMCache integration
+#include "thunder-lmcache-hash.h"
+#include "thunder-lmcache-storage.h"
+
 struct llama_model;
 class llama_batch_allocr;
 
@@ -356,4 +360,9 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+
+    // Thunder LMCache integration
+    std::unique_ptr<ThunderChunkHasher> lmcache_hasher;
+    std::unique_ptr<ThunderChunkStorage> lmcache_storage;
+    bool lmcache_enabled = false;
 };

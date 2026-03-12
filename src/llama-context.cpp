@@ -402,6 +402,34 @@ llama_context::llama_context(
             sampling.token_ids_full_vocab[i] = i;
         }
     }
+
+    // Thunder LMCache initialization
+    {
+        const char* env_lmcache = getenv("THUNDER_LMCACHE");
+        if (env_lmcache && strcmp(env_lmcache, "1") == 0) {
+            lmcache_enabled = true;
+            lmcache_hasher = std::make_unique<ThunderChunkHasher>();
+
+            // Read disk path from env or use default
+            const char* disk_path = getenv("THUNDER_LMCACHE_DISK_PATH");
+            std::string path;
+            if (disk_path) {
+                path = disk_path;
+            } else {
+                const char* home = getenv("HOME");
+                path = std::string(home ? home : "/tmp") + "/.cache/thunderllama/kv_cache.bin";
+            }
+
+            lmcache_storage = std::make_unique<ThunderChunkStorage>(
+                8ULL * 1024 * 1024 * 1024,  // L2: 8GB CPU
+                32ULL * 1024 * 1024 * 1024, // L3: 32GB Disk
+                path
+            );
+
+            LLAMA_LOG_INFO("%s: Thunder LMCache enabled: chunk_size=%d, disk_path=%s\n",
+                           __func__, THUNDER_CHUNK_SIZE, path.c_str());
+        }
+    }
 }
 
 llama_context::~llama_context() {
@@ -1164,11 +1192,23 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         //LLAMA_LOG_INFO("graph set inputs time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
     }
 
+    // Thunder LMCache: Check cache (before processing)
+    if (lmcache_enabled) {
+        // TODO: Check chunk cache and restore K/V
+        LLAMA_LOG_DEBUG("%s: LMCache checking cache for %d tokens\n", __func__, ubatch.n_tokens);
+    }
+
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
         return nullptr;
+    }
+
+    // Thunder LMCache: Store chunks (after processing)
+    if (lmcache_enabled) {
+        // TODO: Extract K/V and store to cache
+        LLAMA_LOG_DEBUG("%s: LMCache storing chunks for %d tokens\n", __func__, ubatch.n_tokens);
     }
 
     ret = GGML_STATUS_SUCCESS;
