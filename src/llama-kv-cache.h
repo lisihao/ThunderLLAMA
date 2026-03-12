@@ -157,6 +157,10 @@ public:
 
     bool get_has_shift() const;
 
+    // Thunder LMCache: Access layer tensors directly
+    ggml_tensor * get_layer_k(int32_t il) const;
+    ggml_tensor * get_layer_v(int32_t il) const;
+
     //
     // graph_build API
     //

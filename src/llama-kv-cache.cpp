@@ -1255,6 +1255,17 @@ bool llama_kv_cache::get_has_shift() const {
     return result;
 }
 
+// Thunder LMCache: Access layer tensors directly
+ggml_tensor * llama_kv_cache::get_layer_k(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    return layers[ikv].k;
+}
+
+ggml_tensor * llama_kv_cache::get_layer_v(int32_t il) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    return layers[ikv].v;
+}
+
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     uint32_t result = 0;
 

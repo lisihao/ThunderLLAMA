@@ -5,6 +5,7 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-kv-cache.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 
@@ -1193,9 +1194,47 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // Thunder LMCache: Check cache (before processing)
-    if (lmcache_enabled) {
-        // TODO: Check chunk cache and restore K/V
-        LLAMA_LOG_DEBUG("%s: LMCache checking cache for %d tokens\n", __func__, ubatch.n_tokens);
+    if (lmcache_enabled && ubatch.n_tokens >= THUNDER_CHUNK_SIZE) {
+        // Try to cast memory to llama_kv_cache (may fail if using hybrid memory)
+        auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+
+        if (kv_cache) {
+            // For each layer
+            for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
+                // Iterate through chunks (256-token aligned)
+                for (size_t chunk_start = 0; chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens;
+                     chunk_start += THUNDER_CHUNK_SIZE) {
+
+                    // Generate chunk key
+                    thunder_kv_chunk_key key = lmcache_hasher->make_key(
+                        ubatch.token + chunk_start,
+                        THUNDER_CHUNK_SIZE,
+                        chunk_start,
+                        il
+                    );
+
+                    // Check cache
+                    thunder_kv_chunk * cached = lmcache_storage->get(key);
+                    if (cached && cached->k_data && cached->v_data) {
+                        // Get layer tensors
+                        ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
+                        ggml_tensor * v_tensor = kv_cache->get_layer_v(il);
+
+                        if (k_tensor && v_tensor) {
+                            // TODO: Calculate offset in tensor for this chunk
+                            // K tensor shape: [n_embd_k_gqa, kv_size, n_stream]
+                            // Need to calculate: offset = chunk_start * n_embd_k_gqa * element_size
+
+                            // TODO: Copy cached K/V to tensors using ggml_backend_tensor_set()
+                            // ggml_backend_tensor_set(k_tensor, cached->k_data, offset, cached->k_size);
+                            // ggml_backend_tensor_set(v_tensor, cached->v_data, offset, cached->v_size);
+
+                            LLAMA_LOG_DEBUG("LMCache hit: layer=%d, chunk_start=%zu (restore skipped - not implemented)\n", il, chunk_start);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
@@ -1206,9 +1245,54 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // Thunder LMCache: Store chunks (after processing)
-    if (lmcache_enabled) {
-        // TODO: Extract K/V and store to cache
-        LLAMA_LOG_DEBUG("%s: LMCache storing chunks for %d tokens\n", __func__, ubatch.n_tokens);
+    if (lmcache_enabled && ubatch.n_tokens >= THUNDER_CHUNK_SIZE) {
+        // Try to cast memory to llama_kv_cache (may fail if using hybrid memory)
+        auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+
+        if (kv_cache) {
+            // For each layer
+            for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
+                // Iterate through chunks (256-token aligned)
+                for (size_t chunk_start = 0; chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens;
+                     chunk_start += THUNDER_CHUNK_SIZE) {
+
+                    // Generate chunk key
+                    thunder_kv_chunk_key key = lmcache_hasher->make_key(
+                        ubatch.token + chunk_start,
+                        THUNDER_CHUNK_SIZE,
+                        chunk_start,
+                        il
+                    );
+
+                    // Check if already cached
+                    if (!lmcache_storage->get(key)) {
+                        // Get layer tensors
+                        ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
+                        ggml_tensor * v_tensor = kv_cache->get_layer_v(il);
+
+                        if (k_tensor && v_tensor) {
+                            // TODO: Calculate offset and size for this chunk
+                            // K tensor shape: [n_embd_k_gqa, kv_size, n_stream]
+                            // chunk_size = THUNDER_CHUNK_SIZE * n_embd_k_gqa * element_size
+                            // offset = chunk_start * n_embd_k_gqa * element_size
+
+                            // TODO: Allocate memory and extract K/V using ggml_backend_tensor_get()
+                            // thunder_kv_chunk chunk;
+                            // chunk.key = key;
+                            // chunk.k_size = calculated_size;
+                            // chunk.v_size = calculated_size;
+                            // chunk.k_data = malloc(chunk.k_size);
+                            // chunk.v_data = malloc(chunk.v_size);
+                            // ggml_backend_tensor_get(k_tensor, chunk.k_data, offset, chunk.k_size);
+                            // ggml_backend_tensor_get(v_tensor, chunk.v_data, offset, chunk.v_size);
+                            // lmcache_storage->put(chunk);
+
+                            LLAMA_LOG_DEBUG("LMCache store (skipped - not implemented): layer=%d, chunk_start=%zu\n", il, chunk_start);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     ret = GGML_STATUS_SUCCESS;
