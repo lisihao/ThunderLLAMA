@@ -1245,10 +1245,24 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                     for (size_t chunk_idx = 0; chunk_idx < max_chunks; chunk_idx++) {
                         const size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
 
-                        thunder_kv_chunk_key key;
-                        key.content_hash = 0;
-                        key.layer_idx = il;
-                        key.chunk_start = chunk_start;
+                        thunder_kv_chunk_key key = {};
+
+                        // Hybrid hashing: content-based in prefill, position-based in decode
+                        // Only use content-based if we have enough tokens in ubatch to avoid out-of-bounds access
+                        if (chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens) {
+                            // Content-based hashing (prefill phase)
+                            key = lmcache_hasher->make_key(
+                                ubatch.token,
+                                ubatch.n_tokens,
+                                chunk_start,
+                                il
+                            );
+                        } else {
+                            // Position-based hashing (decode phase or insufficient tokens)
+                            key.content_hash = 0;
+                            key.layer_idx = il;
+                            key.chunk_start = chunk_start;
+                        }
 
                         lmcache_chunks_needed++;
 
@@ -1346,11 +1360,24 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                 for (size_t chunk_idx = 0; chunk_idx < max_chunks; chunk_idx++) {
                     const size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
 
-                    // For MVP, use position-based key (not content-based)
-                    thunder_kv_chunk_key key;
-                    key.content_hash = 0;  // Dummy hash (position-based only)
-                    key.layer_idx = il;
-                    key.chunk_start = chunk_start;
+                    thunder_kv_chunk_key key = {};
+
+                    // Hybrid hashing: content-based in prefill, position-based in decode
+                    // Only use content-based if we have enough tokens in ubatch to avoid out-of-bounds access
+                    if (chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens) {
+                        // Content-based hashing (prefill phase)
+                        key = lmcache_hasher->make_key(
+                            ubatch.token,
+                            ubatch.n_tokens,
+                            chunk_start,
+                            il
+                        );
+                    } else {
+                        // Position-based hashing (decode phase or insufficient tokens)
+                        key.content_hash = 0;
+                        key.layer_idx = il;
+                        key.chunk_start = chunk_start;
+                    }
 
                     // Check if already cached (storage layer handles deduplication)
                     if (!lmcache_storage->get(key)) {
