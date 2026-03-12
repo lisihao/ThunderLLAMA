@@ -149,6 +149,9 @@ add_library(llama
             models/t5-enc.cpp
             models/wavtokenizer-dec.cpp
             models/xverse.cpp
+            thunder-lmcache-hash.cpp
+            ../include/thunder-lmcache-hash.h
+            ../examples/gguf-hash/deps/xxhash/xxhash.c
             )
 
 set_target_properties(llama PROPERTIES
@@ -159,6 +162,7 @@ set_target_properties(llama PROPERTIES
 
 target_include_directories(llama PRIVATE .)
 target_include_directories(llama PUBLIC ../include)
+target_include_directories(llama PRIVATE ../examples/gguf-hash/deps/xxhash)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)

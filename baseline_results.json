@@ -1,0 +1,58 @@
+{
+  "timestamp": "2026-03-12 05:44:25",
+  "config": {
+    "flash_attn": true,
+    "paged_attn": false,
+    "model": "qwen3-0.6b"
+  },
+  "results": [
+    {
+      "scenario": "Short Prompt (10 tokens)",
+      "single_request": {
+        "avg_latency_ms": 178.5126527150472,
+        "avg_tokens_per_second": 28.16115769139767
+      },
+      "latency_distribution": {
+        "p50_ms": 169.84355449676514,
+        "p95_ms": 372.48992919921875,
+        "p99_ms": 372.48992919921875
+      },
+      "concurrent": {
+        "qps": 4.95123084178399,
+        "throughput_tokens_per_second": 24.756154208919952
+      }
+    },
+    {
+      "scenario": "Medium Prompt (50 tokens)",
+      "single_request": {
+        "avg_latency_ms": 351.4405091603597,
+        "avg_tokens_per_second": 117.34834784641987
+      },
+      "latency_distribution": {
+        "p50_ms": 419.0859794616699,
+        "p95_ms": 536.2906455993652,
+        "p99_ms": 536.2906455993652
+      },
+      "concurrent": {
+        "qps": 2.6191964945026776,
+        "throughput_tokens_per_second": 102.14866328560443
+      }
+    },
+    {
+      "scenario": "Long Prompt (200 tokens)",
+      "single_request": {
+        "avg_latency_ms": 353.7601629892985,
+        "avg_tokens_per_second": 647.3183765565562
+      },
+      "latency_distribution": {
+        "p50_ms": 507.6390504837036,
+        "p95_ms": 571.3667869567871,
+        "p99_ms": 571.3667869567871
+      },
+      "concurrent": {
+        "qps": 4.302993307965911,
+        "throughput_tokens_per_second": 968.1734942923299
+      }
+    }
+  ]
+}
