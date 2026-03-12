@@ -1,4 +1,5 @@
 #include "thunder-lmcache-storage.h"
+#include "thunder-lmcache-eviction.h"
 
 #include <cstring>
 #include <chrono>
@@ -516,6 +517,10 @@ size_t ThunderChunkStorage::evict_one_l3() {
         if (chunk.k_data) free(chunk.k_data);
         if (chunk.v_data) free(chunk.v_data);
     }
+
+    // Notify external systems (ContextPilot) about eviction
+    std::vector<uint64_t> evicted_hashes = {key.content_hash};
+    ThunderEvictionNotifier::instance().notify(evicted_hashes);
 
     // Remove from L3
     l3_offsets_.erase(it);

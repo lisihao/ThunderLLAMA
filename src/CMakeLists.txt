@@ -155,6 +155,8 @@ add_library(llama
             ../include/thunder-lmcache-storage.h
             thunder-lmcache-control.cpp
             ../include/thunder-lmcache-control.h
+            thunder-lmcache-eviction.cpp
+            ../include/thunder-lmcache-eviction.h
             ../examples/gguf-hash/deps/xxhash/xxhash.c
             )
 
