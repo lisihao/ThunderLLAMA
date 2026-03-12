@@ -283,3 +283,7 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 # Thunder LMCache Hash tests
 llama_build_and_test(test-thunder-lmcache-hash.cpp)
 target_link_libraries(test-thunder-lmcache-hash PRIVATE llama)
+
+# Thunder LMCache Storage tests
+llama_build_and_test(test-thunder-lmcache-storage.cpp)
+target_link_libraries(test-thunder-lmcache-storage PRIVATE llama)

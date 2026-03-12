@@ -151,6 +151,8 @@ add_library(llama
             models/xverse.cpp
             thunder-lmcache-hash.cpp
             ../include/thunder-lmcache-hash.h
+            thunder-lmcache-storage.cpp
+            ../include/thunder-lmcache-storage.h
             ../examples/gguf-hash/deps/xxhash/xxhash.c
             )
 
