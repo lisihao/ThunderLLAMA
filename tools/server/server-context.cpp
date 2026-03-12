@@ -3218,6 +3218,48 @@ void server_routes::init_routes() {
         return res;
     };
 
+    this->get_lmcache_stats = [this](const server_http_req &) {
+        auto res = create_response();
+
+        // Basic LMCache statistics
+        // TODO: Get real statistics from ThunderChunkStorage
+        // For now, return placeholder data based on slot activity
+
+        int active_slots = 0;
+        int total_slots = (int)ctx_server.slots.size();
+
+        for (const auto & slot : ctx_server.slots) {
+            if (slot.state != SLOT_STATE_IDLE) {
+                active_slots++;
+            }
+        }
+
+        // Heuristic estimation:
+        // - If many slots are idle → cache is likely warm
+        // - If many slots are active → cache might be cold
+        double estimated_hit_rate = 0.5; // default: medium
+        if (active_slots == 0) {
+            estimated_hit_rate = 0.9; // idle → warm cache
+        } else if (active_slots >= total_slots / 2) {
+            estimated_hit_rate = 0.5; // many active → might be cold
+        } else {
+            estimated_hit_rate = 0.7; // some activity → medium
+        }
+
+        res->ok({
+            {"l2_chunks", 0},              // TODO: Get from storage
+            {"l2_usage_bytes", 0},         // TODO: Get from storage
+            {"l2_hit_rate", estimated_hit_rate},
+            {"l3_chunks", 0},              // TODO: Get from storage
+            {"l3_usage_bytes", 0},         // TODO: Get from storage
+            {"active_slots", active_slots},
+            {"total_slots", total_slots},
+            {"note", "Placeholder implementation - TODO: integrate with ThunderChunkStorage"}
+        });
+
+        return res;
+    };
+
     this->get_metrics = [this](const server_http_req & req) {
         auto res = create_response();
         if (!params.endpoint_metrics) {
