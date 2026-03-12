@@ -14,8 +14,9 @@ from typing import List, Dict, Any, Optional, Tuple
 import httpx
 import logging
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import defaultdict, deque
 import json
+from lmcache_stats_client import LMCacheStatsClient
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,12 @@ class ClawgateContextOptimizer:
 
         # HTTP client for async requests
         self.http_client = httpx.AsyncClient(timeout=60.0)
+
+        # LMCache stats client for cache-aware routing
+        self.lmcache_client = LMCacheStatsClient(base_url=thunderllama_url)
+
+        # Track recent requests for prefix overlap calculation
+        self.recent_requests = deque(maxlen=20)  # Keep last 20 prompts
 
         # Statistics tracking (per agent)
         self.stats: Dict[str, CacheStats] = defaultdict(
@@ -195,12 +202,29 @@ class ClawgateContextOptimizer:
                 contexts, query, mode="online"
             )
 
-        # Step 2: Send to ThunderLLAMA
+        # Convert messages to prompt string for analysis
+        optimized_prompt = self._messages_to_prompt(optimized_messages)
+
+        # Step 2: **NEW** Cache-aware routing decision
+        should_force, reason = await self._should_force_prefill(
+            optimized_prompt, agent_type
+        )
+
+        # Step 3: Send to ThunderLLAMA (with cache_prompt parameter)
         response = await self._call_thunderllama(
             messages=optimized_messages,
             model=model,
+            cache_prompt=not should_force,  # False → force prefill
             **kwargs
         )
+
+        # Track cache_prompt decision
+        response["cache_prompt_used"] = not should_force
+        response["skip_triggered"] = response.get("skip_count", 0) > 0
+        response["overlap_reason"] = reason
+
+        # Add to recent requests history
+        self.recent_requests.append(optimized_prompt)
 
         # Step 3: Update statistics
         elapsed_ms = (time.time() - start_time) * 1000
@@ -285,10 +309,32 @@ class ClawgateContextOptimizer:
 
         return reordered_results
 
+    def _messages_to_prompt(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Convert OpenAI message format to plain text prompt for prefix analysis
+
+        Args:
+            messages: List of message dicts with "role" and "content"
+
+        Returns:
+            str: Concatenated prompt text
+
+        Example:
+            messages = [
+                {"role": "system", "content": "You are a reviewer"},
+                {"role": "user", "content": "Review this code"}
+            ]
+            → "You are a reviewer Review this code"
+        """
+        # Simple concatenation of all message contents
+        # Role prefixes are ignored for overlap calculation
+        return " ".join(msg.get("content", "") for msg in messages)
+
     async def _call_thunderllama(
         self,
         messages: List[Dict[str, str]],
         model: str,
+        cache_prompt: bool = True,  # **NEW** parameter
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -297,6 +343,8 @@ class ClawgateContextOptimizer:
         Args:
             messages: OpenAI-compatible message list
             model: Model name
+            cache_prompt: Allow session cache (default: True)
+                         False → force full prefill, trigger skip logic
             **kwargs: Additional parameters
 
         Returns:
@@ -307,6 +355,7 @@ class ClawgateContextOptimizer:
         payload = {
             "model": model,
             "messages": messages,
+            "cache_prompt": cache_prompt,  # **NEW** Pass to ThunderLLAMA
             **kwargs
         }
 
@@ -470,11 +519,135 @@ class ClawgateContextOptimizer:
 
         print("\n" + "="*70)
 
+    # ========================================================================
+    # Phase 1: Cache-Aware Routing (2026-03-12)
+    # ========================================================================
+
+    def get_prefix_overlap(
+        self,
+        prompt: str,
+        window_size: int = 10
+    ) -> float:
+        """
+        Calculate prefix overlap between current prompt and recent requests
+
+        Args:
+            prompt: Current prompt text
+            window_size: Number of recent requests to compare (default: 10)
+
+        Returns:
+            float: Average prefix overlap ratio (0.0 - 1.0)
+                  0.0 = no overlap
+                  1.0 = complete overlap
+
+        Note:
+            Uses simple token-level prefix matching.
+            Efficient enough for routing decisions.
+        """
+        if not self.recent_requests:
+            return 0.0
+
+        # Get recent N prompts
+        recent = list(self.recent_requests)[-window_size:]
+
+        # Calculate overlap with each
+        overlaps = []
+        for prev_prompt in recent:
+            overlap = self._calculate_prefix_overlap(prompt, prev_prompt)
+            overlaps.append(overlap)
+
+        # Return average
+        return sum(overlaps) / len(overlaps) if overlaps else 0.0
+
+    def _calculate_prefix_overlap(
+        self,
+        prompt1: str,
+        prompt2: str
+    ) -> float:
+        """
+        Calculate prefix overlap between two prompts
+
+        Algorithm:
+        1. Simple whitespace tokenization
+        2. Find longest common prefix
+        3. Return overlap ratio
+
+        Args:
+            prompt1: First prompt
+            prompt2: Second prompt
+
+        Returns:
+            float: Overlap ratio (0.0 - 1.0)
+        """
+        # Simple tokenization (split by whitespace)
+        tokens1 = prompt1.split()
+        tokens2 = prompt2.split()
+
+        # Find longest common prefix
+        common_len = 0
+        for t1, t2 in zip(tokens1, tokens2):
+            if t1 == t2:
+                common_len += 1
+            else:
+                break
+
+        # Calculate overlap ratio (relative to shorter prompt)
+        min_len = min(len(tokens1), len(tokens2))
+        return common_len / min_len if min_len > 0 else 0.0
+
+    async def _should_force_prefill(
+        self,
+        prompt: str,
+        agent_type: str
+    ) -> Tuple[bool, str]:
+        """
+        Decide whether to force full prefill (disable session cache)
+
+        Decision logic:
+        - High overlap (>80%) + High LMCache hit (>90%) → Force prefill
+        - Low overlap (<30%) → Allow session cache
+        - Medium → Allow session cache
+
+        Args:
+            prompt: Optimized prompt after ContextPilot
+            agent_type: Agent type for logging
+
+        Returns:
+            Tuple[bool, str]: (should_force, reason)
+                - should_force: True → set cache_prompt=false
+                - reason: Decision reason for logging
+        """
+        # 1. Calculate prefix overlap
+        overlap = self.get_prefix_overlap(prompt, window_size=10)
+
+        # 2. Query LMCache hit rate
+        cache_hit_rate = await self.lmcache_client.get_estimated_hit_rate()
+
+        # 3. Decision rules
+        if overlap > 0.8 and cache_hit_rate > 0.9:
+            # High overlap + high hit → force prefill to trigger skip logic
+            reason = f"high_overlap={overlap:.2f},hit_rate={cache_hit_rate:.2f}"
+            logger.info(f"[{agent_type}] Force prefill: {reason}")
+            return True, reason
+
+        elif overlap < 0.3:
+            # Low overlap → allow session cache
+            reason = f"low_overlap={overlap:.2f}"
+            logger.debug(f"[{agent_type}] Allow session cache: {reason}")
+            return False, reason
+
+        else:
+            # Medium overlap → use hybrid hashing, allow session cache
+            reason = f"medium_overlap={overlap:.2f}"
+            logger.debug(f"[{agent_type}] Medium overlap: {reason}")
+            return False, reason
+
     async def close(self):
         """
         Cleanup resources
         """
         await self.http_client.aclose()
+        await self.lmcache_client.close()
         logger.info("ClawgateContextOptimizer closed")
 
 
