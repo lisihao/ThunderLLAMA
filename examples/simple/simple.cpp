@@ -159,13 +159,66 @@ int main(int argc, char ** argv) {
         batch = llama_batch_get_one(&decoder_start_token_id, 1);
     }
 
+    // ==== LMCACHE TEST: Run prompt twice to test cache hit ====
+    fprintf(stderr, "\n========================================\n");
+    fprintf(stderr, "LMCACHE DOUBLE-PREFILL TEST\n");
+    fprintf(stderr, "========================================\n\n");
+
+    // First run: cold cache
+    fprintf(stderr, ">>> RUN 1: Cold cache (storing to LMCache)\n");
+    auto t_run1_start = ggml_time_us();
+
+    if (llama_decode(ctx, batch)) {
+        fprintf(stderr, "%s : failed to eval in run 1\n", __func__);
+        return 1;
+    }
+
+    auto t_run1_end = ggml_time_us();
+    fprintf(stderr, ">>> RUN 1 completed in %.2f s\n\n", (t_run1_end - t_run1_start) / 1000000.0f);
+
+    // Clear KV cache (but keep LMCache storage intact)
+    fprintf(stderr, ">>> Clearing KV cache (LMCache storage preserved)\n");
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_seq_rm(mem, 0, 0, -1);  // Remove all tokens in sequence 0
+    fprintf(stderr, ">>> KV cache cleared\n\n");
+
+    // Second run: warm cache (should hit LMCache and skip computation)
+    fprintf(stderr, ">>> RUN 2: Warm cache (should restore from LMCache and SKIP compute)\n");
+    auto t_run2_start = ggml_time_us();
+
+    // Re-prepare the batch with the same prompt
+    batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
+
+    if (llama_decode(ctx, batch)) {
+        fprintf(stderr, "%s : failed to eval in run 2\n", __func__);
+        return 1;
+    }
+
+    auto t_run2_end = ggml_time_us();
+    fprintf(stderr, ">>> RUN 2 completed in %.2f s\n\n", (t_run2_end - t_run2_start) / 1000000.0f);
+
+    // Print comparison
+    fprintf(stderr, "========================================\n");
+    fprintf(stderr, "RESULTS\n");
+    fprintf(stderr, "========================================\n");
+    fprintf(stderr, "RUN 1 (cold):  %.2f s\n", (t_run1_end - t_run1_start) / 1000000.0f);
+    fprintf(stderr, "RUN 2 (warm):  %.2f s\n", (t_run2_end - t_run2_start) / 1000000.0f);
+    float speedup = (float)(t_run1_end - t_run1_start) / (t_run2_end - t_run2_start);
+    fprintf(stderr, "Speedup:       %.2fx\n", speedup);
+    fprintf(stderr, "========================================\n\n");
+
+    // Now continue with normal generation (using the second run's result)
+    fprintf(stderr, ">>> Continuing with token generation...\n\n");
+
     // main loop
 
     const auto t_main_start = ggml_time_us();
     int n_decode = 0;
     llama_token new_token_id;
 
-    for (int n_pos = 0; n_pos + batch.n_tokens < n_prompt + n_predict; ) {
+    int n_pos = batch.n_tokens;  // Start from where we left off
+
+    for (; n_pos + batch.n_tokens < n_prompt + n_predict; ) {
         // evaluate the current batch with the transformer model
         if (llama_decode(ctx, batch)) {
             fprintf(stderr, "%s : failed to eval, return code %d\n", __func__, 1);

@@ -365,4 +365,9 @@ private:
     std::unique_ptr<ThunderChunkHasher> lmcache_hasher;
     std::unique_ptr<ThunderChunkStorage> lmcache_storage;
     bool lmcache_enabled = false;
+
+    // Track if current batch can skip computation (all chunks cached)
+    bool lmcache_can_skip_compute = false;
+    int lmcache_chunks_needed = 0;
+    int lmcache_chunks_found = 0;
 };

@@ -8,12 +8,17 @@
 #include "llama-kv-cache.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "thunder-lmcache-control.h"
 
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+
+// External API for registering storage instance with control interface
+extern "C" void thunder_lmcache_register_storage(void* storage);
+extern "C" void thunder_lmcache_unregister_storage();
 
 //
 // llama_context
@@ -423,9 +428,15 @@ llama_context::llama_context(
 
             lmcache_storage = std::make_unique<ThunderChunkStorage>(
                 8ULL * 1024 * 1024 * 1024,  // L2: 8GB CPU
-                32ULL * 1024 * 1024 * 1024, // L3: 32GB Disk
+                256ULL * 1024 * 1024 * 1024, // L3: 256GB Disk
                 path
             );
+
+            // Register storage instance for signal handling and control
+            thunder_lmcache_register_storage(lmcache_storage.get());
+
+            // Register signal handlers for safe unmount
+            thunder_lmcache_register_signals();
 
             LLAMA_LOG_INFO("%s: Thunder LMCache enabled: chunk_size=%d, disk_path=%s\n",
                            __func__, THUNDER_CHUNK_SIZE, path.c_str());
@@ -434,6 +445,9 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    // Unregister storage instance from control interface
+    thunder_lmcache_unregister_storage();
+
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -1194,50 +1208,105 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // Thunder LMCache: Check cache (before processing)
-    if (lmcache_enabled && ubatch.n_tokens >= THUNDER_CHUNK_SIZE) {
-        // Try to cast memory to llama_kv_cache (may fail if using hybrid memory)
-        auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+    if (lmcache_enabled && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
+        // Reset skip flags
+        lmcache_can_skip_compute = false;
+        lmcache_chunks_needed = 0;
+        lmcache_chunks_found = 0;
 
-        if (kv_cache) {
-            // For each layer
-            for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
-                // Iterate through chunks (256-token aligned)
-                for (size_t chunk_start = 0; chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens;
-                     chunk_start += THUNDER_CHUNK_SIZE) {
+        // Get the position of the last token in this ubatch
+        const llama_pos kv_end_pos_before = ubatch.pos[ubatch.n_tokens - 1] + 1;
+        const bool is_prefill = ubatch.n_tokens > 1;  // Prefill if processing multiple tokens
 
-                    // Generate chunk key
-                    thunder_kv_chunk_key key = lmcache_hasher->make_key(
-                        ubatch.token + chunk_start,
-                        THUNDER_CHUNK_SIZE,
-                        chunk_start,
-                        il
-                    );
+        fprintf(stderr, "\n[UBATCH START] n_tokens=%d, kv_end_pos_before=%d, is_prefill=%d\n",
+                ubatch.n_tokens, (int)kv_end_pos_before, is_prefill);
+        fflush(stderr);
 
-                    // Check cache
-                    thunder_kv_chunk * cached = lmcache_storage->get(key);
-                    if (cached && cached->k_data && cached->v_data) {
-                        // Get layer tensors
-                        ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
-                        ggml_tensor * v_tensor = kv_cache->get_layer_v(il);
+        if (kv_end_pos_before >= THUNDER_CHUNK_SIZE) {
+            auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
+            fprintf(stderr, "[DEBUG] kv_cache pointer: %p\n", (void*)kv_cache);
+            fflush(stderr);
 
-                        if (k_tensor && v_tensor) {
-                            // TODO: Calculate offset in tensor for this chunk
-                            // K tensor shape: [n_embd_k_gqa, kv_size, n_stream]
-                            // Need to calculate: offset = chunk_start * n_embd_k_gqa * element_size
+            if (kv_cache) {
+                const int32_t n_layer = kv_cache->get_n_layer();
 
-                            // TODO: Copy cached K/V to tensors using ggml_backend_tensor_set()
-                            // ggml_backend_tensor_set(k_tensor, cached->k_data, offset, cached->k_size);
-                            // ggml_backend_tensor_set(v_tensor, cached->v_data, offset, cached->v_size);
+                // Loop through all layers
+                for (int32_t il = 0; il < n_layer; il++) {
+                    ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
+                    if (!k_tensor) {
+                        continue;
+                    }
 
-                            LLAMA_LOG_DEBUG("LMCache hit: layer=%d, chunk_start=%zu (restore skipped - not implemented)\n", il, chunk_start);
+                    const size_t n_embd_k = k_tensor->ne[0];
+                    const size_t element_size = ggml_element_size(k_tensor);
+
+                    // Check all chunks that need to be in cache (include partial chunk)
+                    const size_t max_chunks = (kv_end_pos_before + THUNDER_CHUNK_SIZE - 1) / THUNDER_CHUNK_SIZE;
+                    for (size_t chunk_idx = 0; chunk_idx < max_chunks; chunk_idx++) {
+                        const size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
+
+                        thunder_kv_chunk_key key;
+                        key.content_hash = 0;
+                        key.layer_idx = il;
+                        key.chunk_start = chunk_start;
+
+                        lmcache_chunks_needed++;
+
+                        thunder_kv_chunk * cached = lmcache_storage->get(key);
+                        if (il == 0 && chunk_idx == 0 && is_prefill) {
+                            fprintf(stderr, "[DEBUG] Trying to get chunk: layer=%d, chunk_start=%zu, cached=%p\n",
+                                    il, chunk_start, (void*)cached);
+                            fflush(stderr);
+                        }
+                        if (cached && cached->k_data) {
+                            const size_t offset = chunk_start * n_embd_k * element_size;
+                            // Use the actual cached size (handles partial chunks correctly)
+                            const size_t chunk_bytes = cached->k_size;
+
+                            const size_t tensor_bytes = ggml_nbytes(k_tensor);
+                            if (offset + chunk_bytes > tensor_bytes) {
+                                continue;
+                            }
+
+                            // Restore from cache
+                            ggml_backend_tensor_set(k_tensor, cached->k_data, offset, chunk_bytes);
+                            ggml_backend_synchronize(ggml_backend_sched_get_backend(sched.get(), 0));
+
+                            lmcache_chunks_found++;
+
+                            if ((il == 0 || il == n_layer - 1) && (chunk_idx < 2 || is_prefill)) {
+                                fprintf(stderr, "LMCache RESTORED: layer=%d, chunk_start=%zu, bytes=%zu (total_found=%d)\n",
+                                        il, chunk_start, chunk_bytes, lmcache_chunks_found);
+                            }
                         }
                     }
+                }
+
+                // Check if we can skip computation (all chunks found in cache)
+                fflush(stderr);  // Ensure RESTORED logs are flushed first
+                fprintf(stderr, "[DEBUG] Before check: is_prefill=%d, chunks_needed=%d, chunks_found=%d\n",
+                        is_prefill, lmcache_chunks_needed, lmcache_chunks_found);
+                fflush(stderr);
+
+                if (is_prefill && lmcache_chunks_needed > 0 &&
+                    lmcache_chunks_found == lmcache_chunks_needed) {
+                    lmcache_can_skip_compute = true;
+                    fprintf(stderr, "🚀 LMCache FULL HIT: %d/%d chunks cached, SKIPPING forward pass!\n",
+                            lmcache_chunks_found, lmcache_chunks_needed);
                 }
             }
         }
     }
 
-    const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    // Skip graph computation if all chunks are cached
+    ggml_status status;
+    if (lmcache_can_skip_compute) {
+        // Full cache hit - KV is already restored, skip forward pass
+        fprintf(stderr, "LMCache: Skipping graph_compute (full cache hit)\n");
+        status = GGML_STATUS_SUCCESS;
+    } else {
+        status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
+    }
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: failed to compute graph, compute status: %d\n", __func__, status);
         ret = status;
@@ -1245,53 +1314,92 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // Thunder LMCache: Store chunks (after processing)
-    if (lmcache_enabled && ubatch.n_tokens >= THUNDER_CHUNK_SIZE) {
-        // Try to cast memory to llama_kv_cache (may fail if using hybrid memory)
+    // Check if we have enough tokens in KV cache (not just in this ubatch)
+    if (lmcache_enabled && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
+        // Get the end position of this ubatch in KV cache (position after the last token)
+        const llama_pos kv_end_pos = ubatch.pos[ubatch.n_tokens - 1] + 1;
+        fprintf(stderr, "[DEBUG] After hook: n_tokens=%d, kv_end_pos=%d\n",
+                ubatch.n_tokens, (int)kv_end_pos);
+
+        if (kv_end_pos >= THUNDER_CHUNK_SIZE) {
+            // Try to cast memory to llama_kv_cache (may fail if using hybrid memory)
         auto * kv_cache = dynamic_cast<llama_kv_cache *>(memory.get());
 
         if (kv_cache) {
-            // For each layer
-            for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
-                // Iterate through chunks (256-token aligned)
-                for (size_t chunk_start = 0; chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens;
-                     chunk_start += THUNDER_CHUNK_SIZE) {
+            // Phase 2: Cache ALL layers (0 to n_layer-1)
+            const int32_t n_layer = kv_cache->get_n_layer();
 
-                    // Generate chunk key
-                    thunder_kv_chunk_key key = lmcache_hasher->make_key(
-                        ubatch.token + chunk_start,
-                        THUNDER_CHUNK_SIZE,
-                        chunk_start,
-                        il
-                    );
+            // Loop through all layers
+            for (int32_t il = 0; il < n_layer; il++) {
+                ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
+                if (!k_tensor) {
+                    continue;
+                }
 
-                    // Check if already cached
+                const size_t n_embd_k = k_tensor->ne[0];
+                const size_t element_size = ggml_element_size(k_tensor);
+
+                // Iterate through chunks based on KV cache position
+                // Include partial chunk if exists (e.g. kv_end_pos=751 -> process chunks 0, 256, 512)
+                const size_t max_chunks = (kv_end_pos + THUNDER_CHUNK_SIZE - 1) / THUNDER_CHUNK_SIZE;
+
+                for (size_t chunk_idx = 0; chunk_idx < max_chunks; chunk_idx++) {
+                    const size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
+
+                    // For MVP, use position-based key (not content-based)
+                    thunder_kv_chunk_key key;
+                    key.content_hash = 0;  // Dummy hash (position-based only)
+                    key.layer_idx = il;
+                    key.chunk_start = chunk_start;
+
+                    // Check if already cached (storage layer handles deduplication)
                     if (!lmcache_storage->get(key)) {
-                        // Get layer tensors
-                        ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
-                        ggml_tensor * v_tensor = kv_cache->get_layer_v(il);
+                        // Calculate size (handle partial chunk at the end)
+                        const size_t offset = chunk_start * n_embd_k * element_size;
+                        const size_t chunk_tokens = std::min<size_t>(THUNDER_CHUNK_SIZE, kv_end_pos - chunk_start);
+                        const size_t chunk_bytes = chunk_tokens * n_embd_k * element_size;
 
-                        if (k_tensor && v_tensor) {
-                            // TODO: Calculate offset and size for this chunk
-                            // K tensor shape: [n_embd_k_gqa, kv_size, n_stream]
-                            // chunk_size = THUNDER_CHUNK_SIZE * n_embd_k_gqa * element_size
-                            // offset = chunk_start * n_embd_k_gqa * element_size
+                        // Verify offset + chunk_bytes doesn't exceed tensor size
+                        const size_t tensor_bytes = ggml_nbytes(k_tensor);
+                        if (offset + chunk_bytes > tensor_bytes) {
+                            LLAMA_LOG_WARN("LMCache: store skipped - offset+chunk_bytes (%zu) exceeds tensor size (%zu)\n",
+                                           offset + chunk_bytes, tensor_bytes);
+                            continue;
+                        }
 
-                            // TODO: Allocate memory and extract K/V using ggml_backend_tensor_get()
-                            // thunder_kv_chunk chunk;
-                            // chunk.key = key;
-                            // chunk.k_size = calculated_size;
-                            // chunk.v_size = calculated_size;
-                            // chunk.k_data = malloc(chunk.k_size);
-                            // chunk.v_data = malloc(chunk.v_size);
-                            // ggml_backend_tensor_get(k_tensor, chunk.k_data, offset, chunk.k_size);
-                            // ggml_backend_tensor_get(v_tensor, chunk.v_data, offset, chunk.v_size);
-                            // lmcache_storage->put(chunk);
+                        // Allocate chunk
+                        thunder_kv_chunk chunk;
+                        chunk.key = key;
+                        chunk.k_size = chunk_bytes;
+                        chunk.v_size = 0;  // Phase 1: Skip V
+                        chunk.k_data = malloc(chunk_bytes);
+                        chunk.v_data = nullptr;
 
-                            LLAMA_LOG_DEBUG("LMCache store (skipped - not implemented): layer=%d, chunk_start=%zu\n", il, chunk_start);
+                        if (!chunk.k_data) {
+                            LLAMA_LOG_ERROR("LMCache: failed to allocate %zu bytes\n", chunk_bytes);
+                            continue;
+                        }
+
+                        // Extract K data from tensor
+                        ggml_backend_tensor_get(k_tensor, chunk.k_data, offset, chunk_bytes);
+
+                        // Store to cache
+                        bool stored = lmcache_storage->put(chunk);
+
+                        if (stored) {
+                            // Only log first and last layer to reduce noise
+                            if (il == 0 || il == n_layer - 1) {
+                                fprintf(stderr, "LMCache STORED: layer=%d, chunk_start=%zu, bytes=%zu\n",
+                                        il, chunk_start, chunk_bytes);
+                            }
+                        } else {
+                            LLAMA_LOG_WARN("LMCache: failed to store chunk (cache full?)\n");
+                            free(chunk.k_data);
                         }
                     }
                 }
             }
+        }
         }
     }
 

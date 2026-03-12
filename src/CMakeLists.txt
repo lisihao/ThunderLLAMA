@@ -153,6 +153,8 @@ add_library(llama
             ../include/thunder-lmcache-hash.h
             thunder-lmcache-storage.cpp
             ../include/thunder-lmcache-storage.h
+            thunder-lmcache-control.cpp
+            ../include/thunder-lmcache-control.h
             ../examples/gguf-hash/deps/xxhash/xxhash.c
             )
 
@@ -167,7 +169,7 @@ target_include_directories(llama PUBLIC ../include)
 target_include_directories(llama PRIVATE ../examples/gguf-hash/deps/xxhash)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
-target_link_libraries(llama PUBLIC ggml)
+target_link_libraries(llama PUBLIC ggml z)
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

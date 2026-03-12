@@ -43,9 +43,10 @@ public:
      * Creates the disk cache file if it doesn't exist, or loads existing cache.
      *
      * @param cpu_limit_bytes   Maximum bytes for L2 CPU heap storage (default 8GB).
-     * @param disk_limit_bytes  Maximum bytes for L3 disk mmap storage (default 32GB).
+     * @param disk_limit_bytes  Maximum bytes for L3 disk mmap storage (default 256GB).
      * @param disk_path         Path to disk cache file (default ~/.cache/thunderllama/kv_cache.bin).
      *                          Can be overridden by environment variable THUNDER_LMCACHE_DISK_PATH.
+     *                          For external storage, set: export THUNDER_LMCACHE_DISK_PATH="/Volumes/toshiba/thunderllama/kv_cache.bin"
      *                          Tilde (~) is expanded to user's home directory.
      *
      * @throws std::runtime_error if disk_path cannot be created or opened.
@@ -55,8 +56,8 @@ public:
      * @note Existing disk cache is loaded on startup.
      */
     ThunderChunkStorage(
-        size_t cpu_limit_bytes = 8ULL * 1024 * 1024 * 1024,   // 8GB
-        size_t disk_limit_bytes = 32ULL * 1024 * 1024 * 1024, // 32GB
+        size_t cpu_limit_bytes = 8ULL * 1024 * 1024 * 1024,    // 8GB
+        size_t disk_limit_bytes = 256ULL * 1024 * 1024 * 1024, // 256GB
         const std::string & disk_path = "~/.cache/thunderllama/kv_cache.bin"
     );
 
@@ -156,6 +157,35 @@ public:
      */
     double get_hit_rate() const;
 
+    /**
+     * @brief Safely unmount disk cache for external storage removal.
+     *
+     * Stops accepting new writes to L3, syncs all pending data, and closes disk file.
+     * After calling this, only L2 (memory) cache is available.
+     * Safe to call before ejecting external drives.
+     *
+     * @note Thread-safe: can be called from signal handler or other threads.
+     * @note This is automatically called on SIGUSR1 signal.
+     */
+    void safe_unmount();
+
+    /**
+     * @brief Check if L3 disk cache is currently enabled.
+     *
+     * @return  true if L3 is operational, false if disabled (memory-only mode).
+     */
+    bool is_l3_enabled() const;
+
+    /**
+     * @brief Prefetch hot chunks from L3 to L2.
+     *
+     * Loads top-N frequently accessed chunks from disk to memory asynchronously.
+     * Uses access_freq_ statistics to determine which chunks to prefetch.
+     *
+     * @param top_n  Number of top chunks to prefetch (default 100).
+     */
+    void prefetch_hot_chunks(size_t top_n = 100);
+
 private:
     // ========================================================================
     // L2 (CPU Heap) Storage
@@ -209,6 +239,19 @@ private:
 
     // Disk file path
     std::string disk_path_;
+
+    // L3 enabled flag (false if disk unavailable or unmounted)
+    bool l3_enabled_ = true;
+
+    // ========================================================================
+    // Access Frequency Tracking (for smart prefetch)
+    // ========================================================================
+
+    // Access frequency map: key_hash -> access count
+    std::unordered_map<uint64_t, uint32_t> access_freq_;
+
+    // Total access count (for normalization)
+    uint64_t total_accesses_ = 0;
 
     // ========================================================================
     // Statistics
@@ -327,6 +370,46 @@ private:
      * @return      Expanded path.
      */
     static std::string expand_tilde(const std::string & path);
+
+    /**
+     * @brief Load existing cache from disk on startup.
+     *
+     * Scans the disk file and rebuilds L3 index from existing chunks.
+     * Assumes mutex_ is held (called from constructor).
+     */
+    void load_cache_from_disk();
+
+    /**
+     * @brief Compact disk cache to reclaim space.
+     *
+     * Creates a new temporary file, writes all valid chunks (in l3_offsets_) to it,
+     * then replaces the old cache file. Reclaims disk space from evicted chunks.
+     * Assumes mutex_ is held.
+     *
+     * @return  true on success, false on failure.
+     *
+     * @note This is called automatically when disk usage exceeds 90% of limit.
+     * @note During compaction, cache access may be slower.
+     */
+    bool compact_disk();
+
+    /**
+     * @brief Test if disk is writable.
+     *
+     * Performs a small test write to verify disk health.
+     * Assumes mutex_ is held.
+     *
+     * @return  true if disk is healthy, false otherwise.
+     */
+    bool check_disk_health();
+
+    /**
+     * @brief Disable L3 and clean up disk resources.
+     *
+     * Closes disk file and sets l3_enabled_ = false.
+     * Assumes mutex_ is held.
+     */
+    void disable_l3();
 };
 
 #endif // __cplusplus

@@ -160,6 +160,7 @@ public:
     // Thunder LMCache: Access layer tensors directly
     ggml_tensor * get_layer_k(int32_t il) const;
     ggml_tensor * get_layer_v(int32_t il) const;
+    uint32_t get_n_layer() const;  // Get number of layers
 
     //
     // graph_build API

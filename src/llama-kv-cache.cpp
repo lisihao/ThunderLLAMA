@@ -1266,6 +1266,10 @@ ggml_tensor * llama_kv_cache::get_layer_v(int32_t il) const {
     return layers[ikv].v;
 }
 
+uint32_t llama_kv_cache::get_n_layer() const {
+    return (uint32_t)map_layer_ids.size();
+}
+
 uint32_t llama_kv_cache::get_n_kv(const slot_info & sinfo) const {
     uint32_t result = 0;
 
