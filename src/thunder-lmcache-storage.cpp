@@ -382,6 +382,187 @@ thunder_kv_chunk * ThunderChunkStorage::get(const thunder_kv_chunk_key & key) {
     return nullptr;
 }
 
+std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
+    const std::vector<thunder_kv_chunk_key> & keys
+) {
+    std::vector<thunder_kv_chunk *> results(keys.size(), nullptr);
+
+    if (keys.empty()) {
+        return results;
+    }
+
+    std::vector<std::tuple<size_t, uint64_t, size_t>> l3_reads;  // (index, key_hash, offset)
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        // Phase 1: Check L2 and identify L3 hits
+        for (size_t i = 0; i < keys.size(); i++) {
+            uint64_t key_hash = hash_key(keys[i]);
+
+            // Check L2
+            auto l2_it = l2_cache_.find(key_hash);
+            if (l2_it != l2_cache_.end()) {
+                thunder_kv_chunk & chunk = l2_it->second;
+                chunk.last_access_ns = current_time_ns();
+                chunk.access_count++;
+
+                // Track access frequency
+                access_freq_[key_hash]++;
+                total_accesses_++;
+
+                // Update LRU
+                update_lru(keys[i], true);
+
+                results[i] = &chunk;
+                total_hits_++;
+                continue;
+            }
+
+            // Check L3
+            auto l3_it = l3_offsets_.find(key_hash);
+            if (l3_it != l3_offsets_.end()) {
+                l3_reads.push_back({i, key_hash, l3_it->second});
+
+                // Track access frequency
+                access_freq_[key_hash]++;
+                total_accesses_++;
+
+                total_hits_++;
+            } else {
+                total_misses_++;
+            }
+        }
+    }
+
+    // Phase 2: Parallel L3 reads (if any)
+    if (!l3_reads.empty()) {
+        // Pre-evict L2 to make space for all L3 chunks
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            size_t total_needed = 0;
+            for (const auto & [index, key_hash, offset] : l3_reads) {
+                total_needed += 256 * 1024;  // Assume ~256KB per chunk
+            }
+            size_t space_available = (l2_limit_bytes_ > l2_usage_bytes_)
+                                   ? (l2_limit_bytes_ - l2_usage_bytes_) : 0;
+            if (total_needed > space_available) {
+                size_t to_evict = total_needed - space_available;
+                fprintf(stderr, "[Batch GET] Pre-evicting %zu MB from L2 to make space...\n",
+                        to_evict / (1024 * 1024));
+                evict_lru(to_evict);
+            }
+        }
+
+        const size_t num_threads = std::min(size_t(4), l3_reads.size());
+        std::vector<std::future<std::pair<size_t, thunder_kv_chunk>>> futures;
+
+        fprintf(stderr, "[Batch GET] %zu L3 hits, reading with %zu threads...\n",
+                l3_reads.size(), num_threads);
+
+        auto read_chunk_async = [this](size_t index, size_t offset)
+            -> std::pair<size_t, thunder_kv_chunk> {
+            thunder_kv_chunk chunk;
+
+            // NOTE: read_from_disk() uses mmap (thread-safe for reads)
+            // and zlib uncompress() (thread-safe, no shared state).
+            // We DON'T need mutex here - that's the whole point of async I/O!
+            //
+            // Only lock during actual cache modifications (in collect phase)
+            if (read_from_disk(offset, chunk)) {
+                chunk.last_access_ns = current_time_ns();
+                chunk.access_count++;
+                return {index, chunk};
+            } else {
+                // Return invalid chunk on failure
+                chunk.k_data = nullptr;
+                chunk.v_data = nullptr;
+                return {index, chunk};
+            }
+        };
+
+        // Launch parallel reads
+        for (const auto & [index, key_hash, offset] : l3_reads) {
+            futures.push_back(std::async(std::launch::async, read_chunk_async, index, offset));
+        }
+
+        // Collect results and promote to L2
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+
+            for (auto & future : futures) {
+                auto [index, chunk] = future.get();
+
+                if (chunk.k_data == nullptr || chunk.v_data == nullptr) {
+                    // Read failed, mark as miss
+                    total_misses_++;
+                    total_hits_--;  // Revert hit count
+                    continue;
+                }
+
+                size_t size = chunk_size(chunk);
+                uint64_t key_hash = hash_key(keys[index]);
+
+                // Update L3 LRU
+                update_lru(keys[index], false);
+
+                // Try to promote to L2 if space available
+                if (l2_usage_bytes_ + size <= l2_limit_bytes_) {
+                    // Remove from L3
+                    auto l3_it = l3_offsets_.find(key_hash);
+                    if (l3_it != l3_offsets_.end()) {
+                        l3_offsets_.erase(l3_it);
+                        l3_usage_bytes_ -= size;
+
+                        // Remove from L3 LRU
+                        auto lru_it = l3_lru_index_.find(key_hash);
+                        if (lru_it != l3_lru_index_.end()) {
+                            l3_lru_.erase(lru_it->second);
+                            l3_lru_index_.erase(lru_it);
+                        }
+                    }
+
+                    // Insert into L2
+                    l2_cache_[key_hash] = chunk;
+                    l2_usage_bytes_ += size;
+
+                    l2_lru_.push_front(keys[index]);
+                    l2_lru_index_[key_hash] = l2_lru_.begin();
+
+                    results[index] = &l2_cache_[key_hash];
+                } else {
+                    // L2 full, cannot promote to L2
+                    // BUT we still return the chunk (caller must handle memory)
+                    //
+                    // WARNING: This chunk is NOT cached in L2/L3!
+                    // It's a temporary allocation that caller must manage.
+                    //
+                    // For now, we insert into a temporary map (not ideal, but works)
+                    fprintf(stderr, "[Batch GET] ⚠️  L2 full, cannot promote chunk %zu\n", index);
+
+                    // FIXME: This is a hack - we're leaking memory here
+                    // The chunk is neither in L2 nor L3, just floating
+                    //
+                    // Proper fix would be to either:
+                    // 1. Evict LRU from L2 to make space
+                    // 2. Return a vector of unique_ptr<thunder_kv_chunk>
+                    //
+                    // For now, treat as miss
+                    free(chunk.k_data);
+                    free(chunk.v_data);
+
+                    total_misses_++;
+                    total_hits_--;  // Revert hit count
+                }
+            }
+        }
+
+        fprintf(stderr, "[Batch GET] Completed: %zu chunks loaded\n", l3_reads.size());
+    }
+
+    return results;
+}
+
 void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
     std::unique_lock<std::mutex> lock(mutex_);  // Write operation
 
@@ -696,6 +877,14 @@ bool ThunderChunkStorage::read_from_disk(size_t offset, thunder_kv_chunk & chunk
     memcpy(&compressed_k_size, ptr, 8); ptr += 8;
     memcpy(&compressed_v_size, ptr, 8); ptr += 8;
 
+    // Optimization: prefetch compressed data to reduce page faults during decompression
+    size_t header_size = 72;
+    size_t total_size = header_size + compressed_k_size + compressed_v_size;
+    uint8_t * chunk_start = static_cast<uint8_t *>(disk_mmap_) + offset;
+    if (offset + total_size <= disk_mmap_size_) {
+        madvise(chunk_start, total_size, MADV_WILLNEED);
+    }
+
     // Allocate buffers for decompression
     chunk.k_data = malloc(chunk.k_size);
     chunk.v_data = malloc(chunk.v_size);
@@ -827,6 +1016,13 @@ void ThunderChunkStorage::load_cache_from_disk() {
     int chunks_loaded = 0;
 
     fprintf(stderr, "[ThunderChunkStorage] Loading cache from disk...\n");
+
+    // Optimization: hint kernel to prefetch sequential data
+    if (disk_mmap_ && disk_mmap_size_ > 0) {
+        madvise(disk_mmap_, disk_mmap_size_, MADV_SEQUENTIAL | MADV_WILLNEED);
+        fprintf(stderr, "[ThunderChunkStorage] madvise(SEQUENTIAL | WILLNEED) for %zu MB\n",
+                disk_mmap_size_ / (1024 * 1024));
+    }
 
     while (offset + header_size <= disk_mmap_size_) {
         uint8_t * ptr = static_cast<uint8_t *>(disk_mmap_) + offset;
