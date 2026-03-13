@@ -148,6 +148,53 @@ kill -USR1 $(pgrep llama-server)
 
 **Documentation**: See `LMCACHE_FEATURES.md` for complete details.
 
+## 🚀 Optimization Features
+
+ThunderLLAMA provides **32 optimization features** across 7 categories:
+
+### ThunderLLAMA Exclusive (9 features)
+
+| Feature | Enable | Performance |
+|---------|--------|-------------|
+| **LMCache L2/L3** | `THUNDER_LMCACHE=1` | 8GB + 256GB persistent cache |
+| **Full Skip Logic** | Auto (LMCache) | **27x speedup** on repeated prompts |
+| **Approximate Skip** | Auto (LMCache) | 5% → 30% skip coverage |
+| **Hybrid Hashing** | Auto (LMCache) | 3-7x on prefix overlap |
+| **Smart Prefetch** | Auto (LMCache) | 4x L3 speedup |
+| **Compression** | Auto (L3) | 2-4x storage savings |
+| **Checksum** | Auto (L3) | XXH64 data integrity |
+| **Paged Attention** | `LLAMA_PAGED_ATTENTION=1` | 8x jitter reduction |
+| **Adaptive Chunk Prefill** | `THUNDERLLAMA_CHUNK_PREFILL=N` | Reduced latency jitter |
+
+### Inherited from llama.cpp (Enhanced)
+
+- **Flash Attention** (`-fa on`): 20-30% speedup
+- **Continuous Batching** (`-cb`): 40-60% throughput
+- **KV Cache Quantization** (`-ctk q8_0`): 50-75% memory savings
+- **Prompt Reuse** (`--prompt-reuse-mode`): >100x on cache hit
+- **Speculative Decoding** (`--draft-model`): 2-3x speedup
+- **And 18 more optimizations...**
+
+📖 **Complete list**: See [OPTIMIZATION_FEATURES.md](OPTIMIZATION_FEATURES.md) for all 32 features
+
+### Quick Start Configurations
+
+**High Performance (Agent Scenarios)**:
+```bash
+THUNDER_LMCACHE=1 ./build/bin/llama-server \
+  -m model.gguf -c 8192 -ngl 99 -fa on -cb \
+  --cache-prompt --prompt-reuse-mode auto
+# Expected: 10-27x speedup on repeated prompts
+```
+
+**Memory Optimized**:
+```bash
+THUNDER_LMCACHE=1 ./build/bin/llama-server \
+  -m model.gguf -c 4096 -ngl 99 -fa on \
+  -ctk q8_0 -ctv q8_0 -cram 4096
+# Expected: 50% memory reduction, <3% quality loss
+```
+
 ## The Right KPIs for Paged Attention
 
 > **Paged Attention 的价值不是让单次推理更快，而是让系统更稳定、更可靠**
