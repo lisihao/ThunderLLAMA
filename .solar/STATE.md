@@ -358,11 +358,19 @@ L3: ThunderLLAMA + LMCache
 - ✅ 深度调查完成（PHASE1_INVESTIGATION_REPORT.md）
 
 **Phase 2: 监控与优化**（当前）
-- [ ] Prometheus metrics 集成
-- [ ] skip_rate 监控
-- [ ] cache_hit_rate 监控
-- [ ] Grafana Dashboard
-- [ ] 决策阈值调优（基于真实数据）
+- ✅ **Task 2.1.1**: Prometheus metrics 集成（ClawGate）
+  - metrics.py (5 metric types)
+  - metrics_server.py (port 9090)
+  - Integrated into context_optimizer.py
+- ✅ **Task 2.1.2**: ThunderLLAMA `/lmcache/stats` 真实统计
+  - Added skip tracking counters to llama_context
+  - Implemented llama_get_lmcache_stats() API
+  - Updated /lmcache/stats endpoint
+  - Tested: total_prefills=3, skip_count=0
+- [ ] **Task 2.1.3**: Prometheus scraping 配置（prometheus.yml）
+- [ ] **Task 2.2**: Grafana Dashboard（5 panels）
+- [ ] **Task 2.3**: 决策阈值调优（基于真实数据）
+- [ ] **Task 2.4**: ThunderChunkStorage 真实统计集成
 
 **Phase 3: 高级优化**
 - [ ] Eviction-aware 调度
