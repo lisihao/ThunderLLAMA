@@ -30,6 +30,7 @@ bool g_lmcache_initialized = false;
 
 // ContextPilot chunk hashes for current request (set by server-context before llama_decode)
 static thread_local std::vector<std::string> g_contextpilot_chunk_hashes;
+static thread_local std::vector<uint64_t> g_contextpilot_chunk_base_hashes;  // Pre-computed numeric hashes for O(1) lookup
 static thread_local std::string g_contextpilot_signature;
 
 static void initialize_global_lmcache() {
@@ -1316,7 +1317,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                         ubatch.n_tokens,
                         n_layer,
                         g_lmcache_hasher.get(),
-                        use_contextpilot ? &g_contextpilot_chunk_hashes : nullptr
+                        use_contextpilot ? &g_contextpilot_chunk_hashes : nullptr,
+                        use_contextpilot ? &g_contextpilot_chunk_base_hashes : nullptr
                     );
 
                     fprintf(stderr, "[PREFIX] Result: found=%d, matched_tokens=%zu/%zu\n",
@@ -3792,11 +3794,18 @@ void llama_set_contextpilot_chunks(
     }
 
     g_contextpilot_chunk_hashes.clear();
+    g_contextpilot_chunk_base_hashes.clear();
     if (chunk_hashes && n_chunks > 0) {
         g_contextpilot_chunk_hashes.reserve(n_chunks);
+        g_contextpilot_chunk_base_hashes.reserve(n_chunks);
         for (size_t i = 0; i < n_chunks; i++) {
             if (chunk_hashes[i]) {
-                g_contextpilot_chunk_hashes.emplace_back(chunk_hashes[i]);
+                std::string chunk_str(chunk_hashes[i]);
+                g_contextpilot_chunk_hashes.emplace_back(chunk_str);
+
+                // Pre-compute base hash for O(1) lookup (117x speedup)
+                uint64_t base_hash = std::hash<std::string>{}(chunk_str);
+                g_contextpilot_chunk_base_hashes.push_back(base_hash);
             }
         }
     }

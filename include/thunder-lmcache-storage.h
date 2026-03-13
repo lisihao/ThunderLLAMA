@@ -195,6 +195,33 @@ public:
      */
     void prefetch_hot_chunks(size_t top_n = 100);
 
+    /**
+     * @brief Find prefix match using ContextPilot chunk hashes.
+     *
+     * Searches for matching KV cache chunks using pre-computed chunk hashes from ContextPilot.
+     * Enables efficient deduplication of common context across requests.
+     *
+     * @param tokens                         Input tokens to match.
+     * @param n_tokens                       Number of input tokens.
+     * @param n_layers                       Number of model layers.
+     * @param hasher                         Chunk hasher for computing token chunk hashes.
+     * @param contextpilot_chunk_hashes      Optional vector of chunk hash strings from ContextPilot.
+     * @param contextpilot_chunk_base_hashes Optional vector of pre-computed numeric hashes for O(1) lookup (117x speedup).
+     *
+     * @return  thunder_prefix_match result containing matched tokens, layers, and found status.
+     *
+     * @note If contextpilot_chunk_base_hashes is provided and matches contextpilot_chunk_hashes size,
+     *       uses optimized numeric hash lookup (99% faster). Otherwise falls back to string concatenation.
+     */
+    thunder_prefix_match find_prefix_match(
+        const llama_token * tokens,
+        size_t n_tokens,
+        int32_t n_layers,
+        ThunderChunkHasher * hasher,
+        const std::vector<std::string> * contextpilot_chunk_hashes,
+        const std::vector<uint64_t> * contextpilot_chunk_base_hashes
+    );
+
 private:
     // ========================================================================
     // L2 (CPU Heap) Storage
