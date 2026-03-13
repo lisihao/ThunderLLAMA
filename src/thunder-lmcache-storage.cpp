@@ -118,18 +118,15 @@ ThunderChunkStorage::ThunderChunkStorage(
         fprintf(stderr, "[ThunderChunkStorage] ✓ L3 disk cache initialized successfully\n");
 
         // Prefetch hot chunks from L3 to L2 (smart prefetch based on access frequency)
-        // Note: prefetch_hot_chunks needs mutex, but we're already in constructor's scope
-        // We'll call it without locking since constructor is single-threaded
+        // Note: Constructor is single-threaded, no need for locking
         if (!access_freq_.empty()) {
-            // Temporarily release and re-acquire to call prefetch safely
-            std::lock_guard<std::mutex> lock(mutex_);
             prefetch_hot_chunks(100);
         }
     }
 }
 
 ThunderChunkStorage::~ThunderChunkStorage() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Cleanup resources
 
     // Persist all L2 chunks to L3 before shutdown
     fprintf(stderr, "[ThunderChunkStorage] Persisting %zu L2 chunks to disk...\n", l2_cache_.size());
@@ -187,7 +184,7 @@ ThunderChunkStorage::~ThunderChunkStorage() {
 // ============================================================================
 
 bool ThunderChunkStorage::put(const thunder_kv_chunk & chunk) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Write operation
 
     uint64_t key_hash = hash_key(chunk.key);
     size_t size = chunk_size(chunk);
@@ -281,7 +278,7 @@ bool ThunderChunkStorage::put(const thunder_kv_chunk & chunk) {
 }
 
 thunder_kv_chunk * ThunderChunkStorage::get(const thunder_kv_chunk_key & key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies LRU + stats
 
     uint64_t key_hash = hash_key(key);
     fprintf(stderr, "[Storage GET] key_hash=%016llx, l2_cache size=%zu\n", key_hash, l2_cache_.size());
@@ -379,7 +376,7 @@ thunder_kv_chunk * ThunderChunkStorage::get(const thunder_kv_chunk_key & key) {
 }
 
 void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Write operation
 
     size_t freed = 0;
     while (freed < target_free_bytes && !l2_cache_.empty()) {
@@ -388,23 +385,23 @@ void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
 }
 
 size_t ThunderChunkStorage::get_cpu_usage_bytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l2_usage_bytes_;
 }
 
 size_t ThunderChunkStorage::get_disk_usage_bytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l3_usage_bytes_;
 }
 
 double ThunderChunkStorage::get_hit_rate() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     uint64_t total = total_hits_ + total_misses_;
     return total > 0 ? static_cast<double>(total_hits_) / total : 0.0;
 }
 
 size_t ThunderChunkStorage::get_total_chunks() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l2_cache_.size() + l3_offsets_.size();
 }
 
@@ -825,8 +822,8 @@ void ThunderChunkStorage::load_cache_from_disk() {
         memcpy(&key.chunk_start, ptr, 4); ptr += 4;
         memcpy(&k_size, ptr, 8); ptr += 8;
         memcpy(&v_size, ptr, 8); ptr += 8;
-        // Skip last_access_ns, access_count, padding, checksum (28 bytes)
-        ptr += 28;
+        // Skip last_access_ns (8), access_count (4), padding (4), checksum (8) = 24 bytes
+        ptr += 24;
         memcpy(&compressed_k_size, ptr, 8); ptr += 8;
         memcpy(&compressed_v_size, ptr, 8); ptr += 8;
 
@@ -1089,7 +1086,7 @@ void ThunderChunkStorage::disable_l3() {
 }
 
 void ThunderChunkStorage::safe_unmount() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies L3 state
 
     if (!l3_enabled_) {
         fprintf(stderr, "[ThunderChunkStorage] L3 already disabled, nothing to unmount\n");
@@ -1130,7 +1127,7 @@ void ThunderChunkStorage::safe_unmount() {
 }
 
 bool ThunderChunkStorage::is_l3_enabled() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l3_enabled_;
 }
 
@@ -1144,7 +1141,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
     // Build list of (key_hash, access_count, offset) tuples
     std::vector<std::tuple<uint64_t, uint32_t, size_t>> prefetch_list;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         for (const auto & [key_hash, count] : access_freq_) {
             // Only prefetch chunks that are in L3 (not already in L2)
             auto l3_it = l3_offsets_.find(key_hash);
@@ -1174,7 +1171,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
 
     auto read_chunk_async = [this](uint64_t key_hash, size_t offset) -> std::pair<uint64_t, thunder_kv_chunk> {
         thunder_kv_chunk chunk;
-        std::lock_guard<std::mutex> lock(mutex_); // Protect mmap access
+        std::shared_lock<std::shared_mutex> lock(mutex_); // Protect mmap access
         if (read_from_disk(offset, chunk)) {
             return {key_hash, chunk};
         } else {
@@ -1193,7 +1190,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
     // Collect results and insert into L2
     size_t prefetched = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies L2 and L3
 
         for (auto & future : futures) {
             auto [key_hash, chunk] = future.get();
@@ -1239,4 +1236,125 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
 
     fprintf(stderr, "[ThunderChunkStorage] ✓ Prefetched %zu chunks using %zu threads (L2 usage: %.1f MB)\n",
             prefetched, num_threads, l2_usage_bytes_ / (1024.0 * 1024.0));
+}
+
+// ============================================================================
+// Prefix Matching Implementation
+// ============================================================================
+
+thunder_prefix_match ThunderChunkStorage::find_prefix_match(
+    const llama_token *tokens,
+    size_t n_tokens,
+    int32_t n_layers,
+    ThunderChunkHasher *hasher,
+    const std::vector<std::string> * contextpilot_chunk_hashes
+) {
+    thunder_prefix_match result = {0, 0, false};
+
+    if (!tokens || n_tokens < THUNDER_CHUNK_SIZE || !hasher) {
+        return result;  // Invalid input
+    }
+
+    std::shared_lock<std::shared_mutex> lock(mutex_);  // Read-only operation
+
+    // ContextPilot chunk hash matching (if available)
+    if (contextpilot_chunk_hashes && !contextpilot_chunk_hashes->empty()) {
+        fprintf(stderr, "[CONTEXTPILOT] Using %zu chunk hashes for lookup\n",
+            contextpilot_chunk_hashes->size());
+
+        // Try to match as many chunks as possible from ContextPilot hashes
+        size_t matched_chunks = 0;
+
+        for (size_t chunk_idx = 0; chunk_idx < contextpilot_chunk_hashes->size(); chunk_idx++) {
+            const std::string & chunk_hash = (*contextpilot_chunk_hashes)[chunk_idx];
+            bool chunk_found = true;
+
+            // Check if this chunk exists for ALL layers
+            for (int32_t il = 0; il < n_layers; il++) {
+                // Convert chunk hash string to uint64_t (simplified - just use std::hash)
+                uint64_t hash = std::hash<std::string>{}(chunk_hash + "_layer_" + std::to_string(il));
+
+                // Check L2 cache
+                auto it = l2_cache_.find(hash);
+                if (it == l2_cache_.end()) {
+                    // Not in L2, check L3
+                    auto it3 = l3_offsets_.find(hash);
+                    if (it3 == l3_offsets_.end()) {
+                        chunk_found = false;
+                        break;
+                    }
+                }
+            }
+
+            if (chunk_found) {
+                matched_chunks++;
+            } else {
+                break;  // Stop at first missing chunk
+            }
+        }
+
+        if (matched_chunks > 0) {
+            result.matched_tokens = matched_chunks * THUNDER_CHUNK_SIZE;
+            result.found = true;
+            fprintf(stderr, "[CONTEXTPILOT] Matched %zu/%zu chunks (%zu tokens)\n",
+                matched_chunks, contextpilot_chunk_hashes->size(), result.matched_tokens);
+            return result;
+        }
+
+        fprintf(stderr, "[CONTEXTPILOT] No chunks matched, falling back to token-based matching\n");
+    }
+
+    // Try progressively shorter prefixes (aligned to THUNDER_CHUNK_SIZE)
+    size_t max_chunks = n_tokens / THUNDER_CHUNK_SIZE;
+
+    for (size_t chunk_count = max_chunks; chunk_count > 0; chunk_count--) {
+        size_t len = chunk_count * THUNDER_CHUNK_SIZE;
+        bool all_chunks_match = true;
+
+        // Check if ALL chunks in this prefix exist for ALL layers
+        for (size_t chunk_idx = 0; chunk_idx < chunk_count; chunk_idx++) {
+            size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
+
+            for (int32_t il = 0; il < n_layers; il++) {
+                auto key = hasher->make_key(tokens, len, chunk_start, il);
+                uint64_t hash = hash_key(key);
+
+                // Debug: print first chunk/layer check
+                if (chunk_idx == 0 && il == 0 && chunk_count == max_chunks) {
+                    fprintf(stderr, "[PREFIX-DEBUG] Checking len=%zu, chunk_start=%zu, layer=%d, hash=%016llx, L2_size=%zu, L3_size=%zu\n",
+                        len, chunk_start, il, (unsigned long long)hash, l2_cache_.size(), l3_offsets_.size());
+                }
+
+                // Check L2 cache
+                auto it = l2_cache_.find(hash);
+                if (it == l2_cache_.end()) {
+                    // Not in L2, check L3
+                    auto it3 = l3_offsets_.find(hash);
+                    if (it3 == l3_offsets_.end()) {
+                        // Not found in either cache
+                        if (chunk_idx == 0 && il == 0) {
+                            fprintf(stderr, "[PREFIX-DEBUG] MISS at len=%zu, chunk_idx=%zu, layer=%d\n",
+                                len, chunk_idx, il);
+                        }
+                        all_chunks_match = false;
+                        break;
+                    }
+                }
+            }
+
+            if (!all_chunks_match) {
+                break;  // This prefix doesn't match, try shorter
+            }
+        }
+
+        if (all_chunks_match) {
+            // Found matching prefix for all chunks and all layers!
+            result.matched_tokens = len;
+            result.matched_layers = n_layers;
+            result.found = true;
+            return result;
+        }
+    }
+
+    return result;  // No prefix match found
 }

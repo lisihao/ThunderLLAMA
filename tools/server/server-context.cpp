@@ -2627,6 +2627,26 @@ private:
         int32_t i_next = 0;
 
         // process the created batch of tokens
+        // Set ContextPilot chunk hashes before decode (if available)
+        // Find the first slot with a task containing chunk hashes
+        for (auto & slot : slots) {
+            if (slot.state != SLOT_STATE_IDLE && slot.task && !slot.task->context_chunks.empty()) {
+                // Convert std::vector<std::string> to const char**
+                std::vector<const char*> chunk_ptrs;
+                chunk_ptrs.reserve(slot.task->context_chunks.size());
+                for (const auto & chunk : slot.task->context_chunks) {
+                    chunk_ptrs.push_back(chunk.c_str());
+                }
+
+                llama_set_contextpilot_chunks(
+                    slot.task->context_signature.empty() ? nullptr : slot.task->context_signature.c_str(),
+                    chunk_ptrs.data(),
+                    chunk_ptrs.size()
+                );
+                break; // Only set once per decode call
+            }
+        }
+
         for (int32_t i = 0; i < batch.n_tokens; i = i_next) {
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
 
@@ -2979,7 +2999,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
-            task_response_type res_type) {
+            task_response_type res_type,
+            const std::string & context_signature,
+            const std::vector<std::string> & context_chunks) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
@@ -3023,6 +3045,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params.res_type          = res_type;
             task.params.oaicompat_cmpl_id = completion_id;
             task.params.oaicompat_model   = meta->model_name;
+
+            // ContextPilot Dedup
+            task.context_signature = context_signature;
+            task.context_chunks    = context_chunks;
 
             // prepare child tasks
             if (task.params.n_cmpl > 1) {
@@ -3645,12 +3671,66 @@ void server_routes::init_routes() {
             body,
             meta->chat_params,
             files);
+
+        // 解析 ContextPilot 元数据（如果存在）
+        std::string contextpilot_order_header;
+        auto it_header = req.headers.find("x-contextpilot-optimal-order");
+        if (it_header != req.headers.end()) {
+            contextpilot_order_header = it_header->second;
+            SRV_INF("🎯 ContextPilot Header detected: x-contextpilot-optimal-order = %s\n",
+                    contextpilot_order_header.c_str());
+        }
+
+        // 解析 ContextPilot Dedup headers
+        std::string context_signature;
+        std::vector<std::string> context_chunks;
+
+        // DEBUG: Print all headers received
+        fprintf(stderr, "[DEBUG] Total headers received: %zu\n", req.headers.size());
+        for (const auto & h : req.headers) {
+            fprintf(stderr, "[DEBUG] Header: '%s' = '%s'\n", h.first.c_str(), h.second.c_str());
+        }
+
+        // FIX: Use capitalized header names (HTTP library preserves original case)
+        auto it_sig = req.headers.find("X-Context-Signature");
+        if (it_sig != req.headers.end()) {
+            context_signature = it_sig->second;
+            fprintf(stderr, "[DEBUG] ✅ Found X-Context-Signature: %s\n", context_signature.c_str());
+            SRV_INF("🎯 ContextPilot Signature: %s\n", context_signature.c_str());
+        } else {
+            fprintf(stderr, "[DEBUG] ❌ X-Context-Signature NOT FOUND\n");
+        }
+
+        auto it_chunks = req.headers.find("X-Context-Chunks");
+        if (it_chunks != req.headers.end()) {
+            fprintf(stderr, "[DEBUG] ✅ Found X-Context-Chunks: %s\n", it_chunks->second.c_str());
+            try {
+                json chunks_json = json::parse(it_chunks->second);
+                if (chunks_json.is_array()) {
+                    for (const auto & chunk : chunks_json) {
+                        if (chunk.is_string()) {
+                            context_chunks.push_back(chunk.get<std::string>());
+                        }
+                    }
+                    fprintf(stderr, "[DEBUG] ✅ Parsed %zu chunks\n", context_chunks.size());
+                    SRV_INF("🎯 ContextPilot Chunks: %zu chunks parsed\n", context_chunks.size());
+                }
+            } catch (const std::exception & e) {
+                fprintf(stderr, "[DEBUG] ❌ Failed to parse chunks: %s\n", e.what());
+                SRV_WRN("Failed to parse X-Context-Chunks header: %s\n", e.what());
+            }
+        } else {
+            fprintf(stderr, "[DEBUG] ❌ X-Context-Chunks NOT FOUND\n");
+        }
+
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_CHAT);
+            TASK_RESPONSE_TYPE_OAI_CHAT,
+            context_signature,
+            context_chunks);
     };
 
     this->post_responses_oai = [this](const server_http_req & req) {
