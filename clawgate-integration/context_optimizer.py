@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from collections import defaultdict, deque
 import json
 from lmcache_stats_client import LMCacheStatsClient
+from metrics import MetricsRecorder, record_force_prefill, record_allow_cache
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,11 @@ class ClawgateContextOptimizer:
             Response from ThunderLLAMA
         """
         import time
+
+        # Metrics: Start tracking request
+        metrics_recorder = MetricsRecorder()
+        metrics_recorder.start_request(agent_type)
+
         start_time = time.time()
 
         # Step 1: Optimize with ContextPilot
@@ -210,6 +216,17 @@ class ClawgateContextOptimizer:
             optimized_prompt, agent_type
         )
 
+        # Metrics: Record decision
+        overlap = self.get_prefix_overlap(optimized_prompt, window_size=10)
+        cache_hit_rate = await self.lmcache_client.get_estimated_hit_rate()
+        decision = "force_prefill" if should_force else "allow_cache"
+        metrics_recorder.record_decision(
+            decision=decision,
+            reason=reason,
+            overlap=overlap,
+            hit_rate=cache_hit_rate
+        )
+
         # Step 3: Send to ThunderLLAMA (with cache_prompt parameter)
         response = await self._call_thunderllama(
             messages=optimized_messages,
@@ -219,9 +236,15 @@ class ClawgateContextOptimizer:
         )
 
         # Track cache_prompt decision
+        skip_triggered = response.get("skip_count", 0) > 0
         response["cache_prompt_used"] = not should_force
-        response["skip_triggered"] = response.get("skip_count", 0) > 0
+        response["skip_triggered"] = skip_triggered
         response["overlap_reason"] = reason
+
+        # Metrics: Update skip_triggered status
+        if skip_triggered:
+            from metrics import skip_triggered_total
+            skip_triggered_total.inc()
 
         # Add to recent requests history
         self.recent_requests.append(optimized_prompt)
@@ -234,6 +257,9 @@ class ClawgateContextOptimizer:
             tokens_saved=response.get("cached_tokens", 0),
             latency_ms=elapsed_ms
         )
+
+        # Metrics: Finish tracking request
+        metrics_recorder.finish_request()
 
         logger.debug(f"Agent {agent_type}: {elapsed_ms:.1f}ms, cache_hit={response.get('cache_hit')}")
 

@@ -1218,6 +1218,11 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         const llama_pos kv_end_pos_before = ubatch.pos[ubatch.n_tokens - 1] + 1;
         const bool is_prefill = ubatch.n_tokens > 1;  // Prefill if processing multiple tokens
 
+        // Track total prefills for statistics
+        if (is_prefill) {
+            lmcache_total_prefills++;
+        }
+
         fprintf(stderr, "\n[UBATCH START] n_tokens=%d, kv_end_pos_before=%d, is_prefill=%d\n",
                 ubatch.n_tokens, (int)kv_end_pos_before, is_prefill);
         fflush(stderr);
@@ -1305,6 +1310,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                 if (is_prefill && lmcache_chunks_needed > 0 &&
                     lmcache_chunks_found == lmcache_chunks_needed) {
                     lmcache_can_skip_compute = true;
+                    lmcache_skip_count++;  // Track skip for statistics
                     fprintf(stderr, "🚀 LMCache FULL HIT: %d/%d chunks cached, SKIPPING forward pass!\n",
                             lmcache_chunks_found, lmcache_chunks_needed);
                 }

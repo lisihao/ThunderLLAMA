@@ -1172,3 +1172,18 @@ const char * llama_print_system_info(void) {
     return s.c_str();
 }
 
+// Get LMCache statistics (Phase 2 monitoring)
+void llama_get_lmcache_stats(
+    const struct llama_context * ctx,
+    uint64_t * total_prefills,
+    uint64_t * skip_count
+) {
+    if (!ctx) {
+        if (total_prefills) *total_prefills = 0;
+        if (skip_count) *skip_count = 0;
+        return;
+    }
+
+    ctx->get_lmcache_stats(total_prefills, skip_count);
+}
+

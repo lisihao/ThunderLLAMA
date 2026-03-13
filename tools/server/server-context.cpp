@@ -546,6 +546,11 @@ public:
         }
     }
 
+    // Get the llama_context (for statistics access)
+    llama_context * get_ctx() const {
+        return ctx;
+    }
+
 private:
     // note: accessing these fields outside of this class is not thread-safe
     // use server_context methods instead
@@ -3221,22 +3226,30 @@ void server_routes::init_routes() {
     this->get_lmcache_stats = [this](const server_http_req &) {
         auto res = create_response();
 
-        // Basic LMCache statistics
-        // TODO: Get real statistics from ThunderChunkStorage
-        // For now, return optimistic values to enable force prefill logic
+        // Get real LMCache statistics from llama_context
+        uint64_t total_prefills = 0;
+        uint64_t skip_count = 0;
 
-        // Optimistic hit rate assumption:
-        // If LMCache is enabled and server has been running, assume high hit rate
-        // This allows ClawGate's cache-aware routing to trigger force prefill
-        double estimated_hit_rate = 0.95; // High hit rate to trigger force prefill
+        auto * ctx = ctx_server.get_ctx();
+        if (ctx) {
+            llama_get_lmcache_stats(ctx, &total_prefills, &skip_count);
+        }
+
+        // Calculate skip rate
+        double skip_rate = 0.0;
+        if (total_prefills > 0) {
+            skip_rate = (double)skip_count / (double)total_prefills;
+        }
 
         res->ok({
-            {"l2_chunks", 0},              // TODO: Get from storage
-            {"l2_usage_bytes", 0},         // TODO: Get from storage
-            {"l2_hit_rate", estimated_hit_rate},
-            {"l3_chunks", 0},              // TODO: Get from storage
-            {"l3_usage_bytes", 0},         // TODO: Get from storage
-            {"note", "Optimistic implementation - returns high hit_rate to enable force prefill"}
+            {"total_prefills", total_prefills},
+            {"skip_count", skip_count},
+            {"skip_rate", skip_rate},
+            {"l2_hit_rate", skip_rate},  // Use skip_rate as hit_rate for ClawGate compatibility
+            {"l2_chunks", 0},           // TODO: Get from ThunderChunkStorage
+            {"l2_usage_bytes", 0},      // TODO: Get from ThunderChunkStorage
+            {"l3_chunks", 0},           // TODO: Get from ThunderChunkStorage
+            {"l3_usage_bytes", 0}       // TODO: Get from ThunderChunkStorage
         });
 
         return res;

@@ -963,6 +963,14 @@ extern "C" {
     // and is not necessary to call it explicitly in most cases
     LLAMA_API void llama_synchronize(struct llama_context * ctx);
 
+    // Get LMCache statistics (Phase 2 monitoring)
+    // Returns: total_prefills, skip_count
+    LLAMA_API void llama_get_lmcache_stats(
+        const struct llama_context * ctx,
+        uint64_t * total_prefills,
+        uint64_t * skip_count
+    );
+
     // Token logits obtained from the last call to llama_decode()
     // The logits for which llama_batch.logits[i] != 0 are stored contiguously
     // in the order they have appeared in the batch.

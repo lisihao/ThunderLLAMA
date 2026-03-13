@@ -205,6 +205,14 @@ struct llama_context {
             int64_t                          ndata_in_loop,
             int64_t                          t_loop_start);
 
+    //
+    // LMCache statistics (Phase 2)
+    //
+    void get_lmcache_stats(uint64_t * total_prefills, uint64_t * skip_count) const {
+        if (total_prefills) *total_prefills = lmcache_total_prefills;
+        if (skip_count) *skip_count = lmcache_skip_count;
+    }
+
 private:
     //
     // output
@@ -370,4 +378,8 @@ private:
     bool lmcache_can_skip_compute = false;
     int lmcache_chunks_needed = 0;
     int lmcache_chunks_found = 0;
+
+    // Statistics for monitoring (Phase 2)
+    mutable uint64_t lmcache_total_prefills = 0;  // Total number of prefill operations
+    mutable uint64_t lmcache_skip_count = 0;      // Number of skipped forward passes
 };
