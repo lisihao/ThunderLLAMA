@@ -16,6 +16,11 @@
 #include "thunder-lmcache-hash.h"
 #include "thunder-lmcache-storage.h"
 
+// Global LMCache singleton (defined in llama-context.cpp)
+extern std::unique_ptr<ThunderChunkHasher> g_lmcache_hasher;
+extern std::unique_ptr<ThunderChunkStorage> g_lmcache_storage;
+extern bool g_lmcache_initialized;
+
 struct llama_model;
 class llama_batch_allocr;
 
@@ -221,7 +226,7 @@ struct llama_context {
         uint64_t * l3_usage_bytes,
         double * hit_rate
     ) const {
-        if (!lmcache_storage) {
+        if (!g_lmcache_storage) {
             if (total_chunks) *total_chunks = 0;
             if (l2_usage_bytes) *l2_usage_bytes = 0;
             if (l3_usage_bytes) *l3_usage_bytes = 0;
@@ -229,10 +234,10 @@ struct llama_context {
             return;
         }
 
-        if (total_chunks) *total_chunks = lmcache_storage->get_total_chunks();
-        if (l2_usage_bytes) *l2_usage_bytes = lmcache_storage->get_cpu_usage_bytes();
-        if (l3_usage_bytes) *l3_usage_bytes = lmcache_storage->get_disk_usage_bytes();
-        if (hit_rate) *hit_rate = lmcache_storage->get_hit_rate();
+        if (total_chunks) *total_chunks = g_lmcache_storage->get_total_chunks();
+        if (l2_usage_bytes) *l2_usage_bytes = g_lmcache_storage->get_cpu_usage_bytes();
+        if (l3_usage_bytes) *l3_usage_bytes = g_lmcache_storage->get_disk_usage_bytes();
+        if (hit_rate) *hit_rate = g_lmcache_storage->get_hit_rate();
     }
 
 private:
@@ -391,10 +396,8 @@ private:
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
 
-    // Thunder LMCache integration
-    std::unique_ptr<ThunderChunkHasher> lmcache_hasher;
-    std::unique_ptr<ThunderChunkStorage> lmcache_storage;
-    bool lmcache_enabled = false;
+    // Thunder LMCache integration (now using global singleton)
+    // lmcache_hasher and lmcache_storage are now global variables
 
     // Track if current batch can skip computation (all chunks cached)
     bool lmcache_can_skip_compute = false;

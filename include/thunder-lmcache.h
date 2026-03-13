@@ -67,6 +67,15 @@ extern "C" {
         uint32_t access_count;     // Access count (popularity)
     } thunder_kv_chunk;
 
+    /**
+     * @brief Result of prefix matching operation
+     */
+    typedef struct {
+        size_t matched_tokens;   ///< Number of matched tokens
+        int32_t matched_layers;  ///< Number of layers with complete match
+        bool found;              ///< Whether any prefix match was found
+    } thunder_prefix_match;
+
     // ============================================================================
     // C API Functions (implemented in thunder-lmcache.cpp)
     // ============================================================================

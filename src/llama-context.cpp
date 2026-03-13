@@ -20,6 +20,57 @@
 extern "C" void thunder_lmcache_register_storage(void* storage);
 extern "C" void thunder_lmcache_unregister_storage();
 
+// ============================================================================
+// Global LMCache Singleton (shared across all contexts)
+// ============================================================================
+static std::mutex g_lmcache_mutex;  // Internal mutex, not exposed
+std::unique_ptr<ThunderChunkHasher> g_lmcache_hasher;
+std::unique_ptr<ThunderChunkStorage> g_lmcache_storage;
+bool g_lmcache_initialized = false;
+
+// ContextPilot chunk hashes for current request (set by server-context before llama_decode)
+static thread_local std::vector<std::string> g_contextpilot_chunk_hashes;
+static thread_local std::string g_contextpilot_signature;
+
+static void initialize_global_lmcache() {
+    std::lock_guard<std::mutex> lock(g_lmcache_mutex);
+
+    if (g_lmcache_initialized) {
+        return;  // Already initialized
+    }
+
+    const char* env_lmcache = getenv("THUNDER_LMCACHE");
+    if (env_lmcache && strcmp(env_lmcache, "1") == 0) {
+        fprintf(stderr, "[LMCache] Initializing global singleton...\n");
+
+        g_lmcache_hasher = std::make_unique<ThunderChunkHasher>();
+
+        // Read disk path from env or use default
+        const char* disk_path = getenv("THUNDER_LMCACHE_DISK_PATH");
+        std::string path;
+        if (disk_path) {
+            path = disk_path;
+        } else {
+            const char* home = getenv("HOME");
+            path = std::string(home ? home : "/tmp") + "/.cache/thunderllama/kv_cache.bin";
+        }
+
+        g_lmcache_storage = std::make_unique<ThunderChunkStorage>(
+            8ULL * 1024 * 1024 * 1024,  // L2: 8GB CPU
+            256ULL * 1024 * 1024 * 1024, // L3: 256GB Disk
+            path
+        );
+
+        // Register storage instance for signal handling and control
+        thunder_lmcache_register_storage(g_lmcache_storage.get());
+
+        fprintf(stderr, "[LMCache] ✓ Global singleton initialized: chunk_size=%d, disk_path=%s\n",
+                THUNDER_CHUNK_SIZE, path.c_str());
+
+        g_lmcache_initialized = true;
+    }
+}
+
 // Approximate skip configuration
 constexpr double APPROX_SKIP_THRESHOLD = 0.95;  // 95% hit ratio threshold for approximate skip
 
@@ -311,6 +362,14 @@ llama_context::llama_context(
             use_paged = false;
         } else if (use_paged) {
             LLAMA_LOG_INFO("%s: paged attention enabled with flash_attn=%d\n", __func__, cparams.flash_attn);
+            fprintf(stderr, "\n");
+            fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+            fprintf(stderr, "║  ✅ PAGED ATTENTION ENABLED                                 ║\n");
+            fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+            fprintf(stderr, "║  LLAMA_PAGED_ATTENTION = %s                                ║\n", paged_env);
+            fprintf(stderr, "║  Flash Attention       = %s                                 ║\n", cparams.flash_attn ? "✅ ON" : "❌ OFF");
+            fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+            fprintf(stderr, "\n");
         }
 
         // Calculate block pool size if paged mode is enabled
@@ -325,6 +384,12 @@ llama_context::llama_context(
 
             LLAMA_LOG_INFO("%s: enabling paged attention mode: n_ctx = %u, n_seq_max = %u, block_size = %u, n_blocks = %u\n",
                            __func__, cparams.n_ctx, cparams.n_seq_max, block_size, n_blocks);
+            fprintf(stderr, "║  Context Size          = %u tokens                          ║\n", cparams.n_ctx);
+            fprintf(stderr, "║  Max Sequences         = %u                                  ║\n", cparams.n_seq_max);
+            fprintf(stderr, "║  Block Size            = %u tokens                          ║\n", block_size);
+            fprintf(stderr, "║  Total Blocks          = %u                                  ║\n", n_blocks);
+            fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+            fprintf(stderr, "\n");
         }
 
         llama_memory_params params_mem = {
@@ -421,37 +486,17 @@ llama_context::llama_context(
         }
     }
 
-    // Thunder LMCache initialization
+    // Thunder LMCache initialization (global singleton)
     {
-        const char* env_lmcache = getenv("THUNDER_LMCACHE");
-        if (env_lmcache && strcmp(env_lmcache, "1") == 0) {
-            lmcache_enabled = true;
-            lmcache_hasher = std::make_unique<ThunderChunkHasher>();
+        initialize_global_lmcache();
 
-            // Read disk path from env or use default
-            const char* disk_path = getenv("THUNDER_LMCACHE_DISK_PATH");
-            std::string path;
-            if (disk_path) {
-                path = disk_path;
-            } else {
-                const char* home = getenv("HOME");
-                path = std::string(home ? home : "/tmp") + "/.cache/thunderllama/kv_cache.bin";
+        if (g_lmcache_initialized) {
+            // Register signal handlers for safe unmount (only once)
+            static bool signals_registered = false;
+            if (!signals_registered) {
+                thunder_lmcache_register_signals();
+                signals_registered = true;
             }
-
-            lmcache_storage = std::make_unique<ThunderChunkStorage>(
-                8ULL * 1024 * 1024 * 1024,  // L2: 8GB CPU
-                256ULL * 1024 * 1024 * 1024, // L3: 256GB Disk
-                path
-            );
-
-            // Register storage instance for signal handling and control
-            thunder_lmcache_register_storage(lmcache_storage.get());
-
-            // Register signal handlers for safe unmount
-            thunder_lmcache_register_signals();
-
-            LLAMA_LOG_INFO("%s: Thunder LMCache enabled: chunk_size=%d, disk_path=%s\n",
-                           __func__, THUNDER_CHUNK_SIZE, path.c_str());
         }
     }
 }
@@ -1220,7 +1265,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     }
 
     // Thunder LMCache: Check cache (before processing)
-    if (lmcache_enabled && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
+    if (g_lmcache_initialized && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
         // Reset skip flags
         lmcache_can_skip_compute = false;
         lmcache_chunks_needed = 0;
@@ -1246,6 +1291,88 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
             if (kv_cache) {
                 const int32_t n_layer = kv_cache->get_n_layer();
+
+                // 🔥 Prefix Matching: Try to find longest matching prefix
+                if (is_prefill && g_lmcache_hasher && g_lmcache_storage) {
+                    // Check if prefix matching is enabled (default: yes)
+                    static bool prefix_matching_enabled = []() {
+                        const char* env = getenv("THUNDER_PREFIX_MATCHING");
+                        return !env || strcmp(env, "1") == 0;  // Default: enabled
+                    }();
+
+                    // Check if ContextPilot chunk hashes are available
+                    bool use_contextpilot = !g_contextpilot_chunk_hashes.empty();
+
+                    if (use_contextpilot) {
+                        fprintf(stderr, "[CONTEXTPILOT] Using chunk hashes: signature=%s, n_chunks=%zu\n",
+                            g_contextpilot_signature.c_str(), g_contextpilot_chunk_hashes.size());
+                    } else {
+                        fprintf(stderr, "[PREFIX] Attempting %s match: is_prefill=%d, n_tokens=%zu, n_layer=%d\n",
+                            prefix_matching_enabled ? "prefix" : "exact", is_prefill, ubatch.n_tokens, n_layer);
+                    }
+
+                    auto prefix_match = g_lmcache_storage->find_prefix_match(
+                        ubatch.token,
+                        ubatch.n_tokens,
+                        n_layer,
+                        g_lmcache_hasher.get(),
+                        use_contextpilot ? &g_contextpilot_chunk_hashes : nullptr
+                    );
+
+                    fprintf(stderr, "[PREFIX] Result: found=%d, matched_tokens=%zu/%zu\n",
+                        prefix_match.found, prefix_match.matched_tokens, ubatch.n_tokens);
+
+                    // Determine if we should use the match result
+                    bool should_use_match = prefix_match.found && prefix_match.matched_tokens > 0;
+
+                    // If prefix matching is disabled, only use exact matches
+                    if (!prefix_matching_enabled && prefix_match.matched_tokens < ubatch.n_tokens) {
+                        should_use_match = false;
+                        fprintf(stderr, "[PREFIX] ⚠️  Exact match required but only partial match found (%zu/%zu tokens), ignoring\n",
+                            prefix_match.matched_tokens, ubatch.n_tokens);
+                    }
+
+                    if (should_use_match) {
+                        // Prefix match found!
+                        fprintf(stderr,
+                            "🎯 LMCache PREFIX MATCH: %zu/%zu tokens (%.1f%%), "
+                            "loading cached KV blocks...\n",
+                            prefix_match.matched_tokens,
+                            ubatch.n_tokens,
+                            (double)prefix_match.matched_tokens / ubatch.n_tokens * 100.0
+                        );
+
+                        // Restore cached KV blocks for all layers
+                        for (int32_t il = 0; il < n_layer; il++) {
+                            ggml_tensor * k_tensor = kv_cache->get_layer_k(il);
+                            if (!k_tensor) continue;
+
+                            const size_t n_embd_k = k_tensor->ne[0];
+                            const size_t element_size = ggml_element_size(k_tensor);
+
+                            // Restore all chunks in the prefix
+                            size_t num_chunks = prefix_match.matched_tokens / THUNDER_CHUNK_SIZE;
+                            for (size_t chunk_idx = 0; chunk_idx < num_chunks; chunk_idx++) {
+                                const size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
+
+                                auto key = g_lmcache_hasher->make_key(
+                                    ubatch.token,
+                                    prefix_match.matched_tokens,
+                                    chunk_start,
+                                    il
+                                );
+
+                                thunder_kv_chunk *cached = g_lmcache_storage->get(key);
+                                if (cached && cached->k_data) {
+                                    const size_t offset = chunk_start * n_embd_k * element_size;
+                                    ggml_backend_tensor_set(k_tensor, cached->k_data, offset, cached->k_size);
+                                    lmcache_chunks_found++;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 std::vector<MissingChunkInfo> missing_chunks;
 
                 // Loop through all layers
@@ -1269,7 +1396,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                         // Only use content-based if we have enough tokens in ubatch to avoid out-of-bounds access
                         if (chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens) {
                             // Content-based hashing (prefill phase)
-                            key = lmcache_hasher->make_key(
+                            key = g_lmcache_hasher->make_key(
                                 ubatch.token,
                                 ubatch.n_tokens,
                                 chunk_start,
@@ -1284,7 +1411,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
                         lmcache_chunks_needed++;
 
-                        thunder_kv_chunk * cached = lmcache_storage->get(key);
+                        thunder_kv_chunk * cached = g_lmcache_storage->get(key);
                         if (il == 0 && chunk_idx == 0 && is_prefill) {
                             fprintf(stderr, "[DEBUG] Trying to get chunk: layer=%d, chunk_start=%zu, cached=%p\n",
                                     il, chunk_start, (void*)cached);
@@ -1380,7 +1507,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     // Thunder LMCache: Store chunks (after processing)
     // Check if we have enough tokens in KV cache (not just in this ubatch)
-    if (lmcache_enabled && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
+    if (g_lmcache_initialized && ubatch.token && ubatch.pos && ubatch.n_tokens > 0) {
         // Get the end position of this ubatch in KV cache (position after the last token)
         const llama_pos kv_end_pos = ubatch.pos[ubatch.n_tokens - 1] + 1;
         fprintf(stderr, "[DEBUG] After hook: n_tokens=%d, kv_end_pos=%d\n",
@@ -1417,7 +1544,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                     // Only use content-based if we have enough tokens in ubatch to avoid out-of-bounds access
                     if (chunk_start + THUNDER_CHUNK_SIZE <= ubatch.n_tokens) {
                         // Content-based hashing (prefill phase)
-                        key = lmcache_hasher->make_key(
+                        key = g_lmcache_hasher->make_key(
                             ubatch.token,
                             ubatch.n_tokens,
                             chunk_start,
@@ -1431,7 +1558,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                     }
 
                     // Check if already cached (storage layer handles deduplication)
-                    if (!lmcache_storage->get(key)) {
+                    if (!g_lmcache_storage->get(key)) {
                         // Calculate size (handle partial chunk at the end)
                         const size_t offset = chunk_start * n_embd_k * element_size;
                         const size_t chunk_tokens = std::min<size_t>(THUNDER_CHUNK_SIZE, kv_end_pos - chunk_start);
@@ -1462,7 +1589,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                         ggml_backend_tensor_get(k_tensor, chunk.k_data, offset, chunk_bytes);
 
                         // Store to cache
-                        bool stored = lmcache_storage->put(chunk);
+                        bool stored = g_lmcache_storage->put(chunk);
 
                         if (stored) {
                             // Only log first and last layer to reduce noise
@@ -3652,6 +3779,27 @@ int32_t llama_encode(
     }
 
     return ret;
+}
+
+void llama_set_contextpilot_chunks(
+            const char * signature,
+            const char ** chunk_hashes,
+            size_t n_chunks) {
+    if (signature) {
+        g_contextpilot_signature = signature;
+    } else {
+        g_contextpilot_signature.clear();
+    }
+
+    g_contextpilot_chunk_hashes.clear();
+    if (chunk_hashes && n_chunks > 0) {
+        g_contextpilot_chunk_hashes.reserve(n_chunks);
+        for (size_t i = 0; i < n_chunks; i++) {
+            if (chunk_hashes[i]) {
+                g_contextpilot_chunk_hashes.emplace_back(chunk_hashes[i]);
+            }
+        }
+    }
 }
 
 int32_t llama_decode(

@@ -932,6 +932,13 @@ extern "C" {
             struct llama_context * ctx,
               struct llama_batch   batch);
 
+    // Set ContextPilot chunk hashes for current request (used by LMCache)
+    // Must be called before llama_decode() to enable chunk-based cache lookup
+    LLAMA_API void llama_set_contextpilot_chunks(
+                const char * signature,
+                const char ** chunk_hashes,
+                size_t n_chunks);
+
     // Set the number of threads used for decoding
     // n_threads is the number of threads used for generation (single token)
     // n_threads_batch is the number of threads used for prompt and batch processing (multiple tokens)

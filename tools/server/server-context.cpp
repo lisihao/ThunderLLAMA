@@ -3086,6 +3086,43 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             GGML_ASSERT(!arr.empty() && "empty results");
             if (arr.size() == 1) {
                 // if single request, return single object instead of array
+
+                // ============ 打印输出结果（验证用）============
+                fprintf(stderr, "\n");
+                fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+                fprintf(stderr, "║  📤 OUTPUT RESULT                                           ║\n");
+                fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+
+                // 打印生成的内容
+                if (arr[0].contains("choices") && arr[0]["choices"].is_array() && !arr[0]["choices"].empty()) {
+                    auto & choice = arr[0]["choices"][0];
+                    std::string output_text;
+
+                    // 尝试从不同字段获取输出文本
+                    if (choice.contains("message")) {
+                        if (choice["message"].contains("reasoning_content")) {
+                            output_text = choice["message"]["reasoning_content"].get<std::string>();
+                        } else if (choice["message"].contains("content")) {
+                            output_text = choice["message"]["content"].get<std::string>();
+                        }
+                    } else if (choice.contains("text")) {
+                        output_text = choice["text"].get<std::string>();
+                    }
+
+                    // 截断过长的输出
+                    if (output_text.length() > 500) {
+                        fprintf(stderr, "║  %s... (truncated, total: %zu chars)\n",
+                                output_text.substr(0, 500).c_str(), output_text.length());
+                    } else {
+                        fprintf(stderr, "║  %s\n", output_text.c_str());
+                    }
+                    fprintf(stderr, "║  \n");
+                    fprintf(stderr, "║  Total length: %zu characters\n", output_text.length());
+                }
+
+                fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+                fprintf(stderr, "\n");
+
                 res->ok(arr[0]);
             } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
                 // if multiple results in OAI format, we need to re-format them
@@ -3093,6 +3130,16 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                 for (size_t i = 1; i < arr.size(); i++) {
                     choices.push_back(std::move(arr[i]["choices"][0]));
                 }
+
+                // ============ 打印输出结果（验证用）============
+                fprintf(stderr, "\n");
+                fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+                fprintf(stderr, "║  📤 OUTPUT RESULT (Multiple)                                ║\n");
+                fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+                fprintf(stderr, "║  Total choices: %zu\n", choices.size());
+                fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+                fprintf(stderr, "\n");
+
                 res->ok(arr[0]);
             } else {
                 // multi-results, non-OAI compat
@@ -3722,6 +3769,39 @@ void server_routes::init_routes() {
         } else {
             fprintf(stderr, "[DEBUG] ❌ X-Context-Chunks NOT FOUND\n");
         }
+
+        // ============ 打印输入 Prompt（验证用）============
+        fprintf(stderr, "\n");
+        fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+        fprintf(stderr, "║  📥 INPUT PROMPT                                            ║\n");
+        fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+
+        // 打印 messages 字段
+        if (body.contains("messages") && body["messages"].is_array()) {
+            for (size_t i = 0; i < body["messages"].size(); i++) {
+                auto & msg = body["messages"][i];
+                std::string role = msg.value("role", "unknown");
+                std::string content = msg.value("content", "");
+
+                // 截断过长的内容
+                if (content.length() > 200) {
+                    content = content.substr(0, 200) + "... (truncated)";
+                }
+
+                fprintf(stderr, "║  [%zu] %s: %s\n", i, role.c_str(), content.c_str());
+            }
+        } else if (body.contains("prompt")) {
+            std::string prompt = body["prompt"].is_string() ?
+                                 body["prompt"].get<std::string>() :
+                                 body["prompt"].dump();
+            if (prompt.length() > 200) {
+                prompt = prompt.substr(0, 200) + "... (truncated)";
+            }
+            fprintf(stderr, "║  Prompt: %s\n", prompt.c_str());
+        }
+
+        fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+        fprintf(stderr, "\n");
 
         return handle_completions_impl(
             req,
