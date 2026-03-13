@@ -269,6 +269,25 @@ THUNDER_LMCACHE=1 llama-server \
 # Expected: 2-5x throughput
 ```
 
+### ClawGate Integration Performance
+
+**Three-Scenario Comparison** (4 concurrent Agent requests, Qwen3-30B):
+
+| Scenario | Throughput | Skip Rate | Notes |
+|----------|-----------|-----------|-------|
+| **Direct ThunderLLAMA** | **687.6 tok/s** | **94%** | 🏆 **Ideal** - Full LMCache benefits |
+| Direct standard llama.cpp | 78.88 tok/s | N/A | 🥇 Best without caching |
+| ClawGate + standard llama | 55.21 tok/s | N/A | 🥈 Multi-backend orchestration |
+| ClawGate + ThunderLLAMA | 52.42 tok/s | **0%** | ⚠️ Cache consistency broken |
+
+**Key Findings**:
+- ⚠️ **ClawGate breaks cache consistency**: Skip rate drops from 94% to 0% (request format changes)
+- 💡 **ThunderLLAMA needs high skip rate**: With 0% skip, optimizations become overhead
+- 🎯 **Use direct access for best performance**: Avoid intermediate layers that modify requests
+- 📊 **When to use ClawGate**: Multi-backend routing, failover, task classification (accept 30-50% overhead)
+
+**Recommendation**: For Agent applications with fixed system prompts, use **direct ThunderLLAMA access** to achieve 8-9x throughput gains. Only use ClawGate when multi-backend orchestration is required.
+
 **Test Scripts**: See `/tmp/benchmark_*.sh` for reproduction
 
 ## The Right KPIs for Paged Attention
