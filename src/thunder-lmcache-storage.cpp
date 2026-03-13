@@ -273,6 +273,13 @@ bool ThunderChunkStorage::put(const thunder_kv_chunk & chunk) {
     l2_lru_.push_front(chunk.key);
     l2_lru_index_[key_hash] = l2_lru_.begin();
 
+    // Update chunk-level index for fast prefix matching
+    uint64_t chunk_base_hash = static_cast<uint64_t>(chunk.key.content_hash) ^
+                               static_cast<uint64_t>(chunk.key.chunk_start);
+    ChunkInfo & info = chunk_index_[chunk_base_hash];
+    info.base_hash = chunk_base_hash;
+    info.layer_bitmap.set(chunk.key.layer_idx);
+
     fprintf(stderr, "[Storage PUT] SUCCESS: l2_cache size=%zu\n", l2_cache_.size());
     return true;
 }
@@ -531,6 +538,18 @@ size_t ThunderChunkStorage::evict_one_l3() {
     // Remove from L3 LRU
     l3_lru_.pop_back();
     l3_lru_index_.erase(key_hash);
+
+    // Update chunk-level index: clear this layer's bit
+    uint64_t chunk_base_hash = static_cast<uint64_t>(key.content_hash) ^
+                               static_cast<uint64_t>(key.chunk_start);
+    auto chunk_it = chunk_index_.find(chunk_base_hash);
+    if (chunk_it != chunk_index_.end()) {
+        chunk_it->second.layer_bitmap.reset(key.layer_idx);
+        // If no layers left for this chunk, remove the entire entry
+        if (chunk_it->second.layer_bitmap.none()) {
+            chunk_index_.erase(chunk_it);
+        }
+    }
 
     // Note: Disk space is not reclaimed (would require compaction)
     // For Phase 1, we just mark the space as unused
@@ -1333,6 +1352,45 @@ thunder_prefix_match ThunderChunkStorage::find_prefix_match(
         for (size_t chunk_idx = 0; chunk_idx < chunk_count; chunk_idx++) {
             size_t chunk_start = chunk_idx * THUNDER_CHUNK_SIZE;
 
+            // Optimization: Use chunk-level index for fast completeness checking
+            auto first_key = hasher->make_key(tokens, len, chunk_start, 0);
+            uint64_t chunk_base_hash = static_cast<uint64_t>(first_key.content_hash) ^
+                                       static_cast<uint64_t>(first_key.chunk_start);
+
+            auto chunk_it = chunk_index_.find(chunk_base_hash);
+
+            // Fast path: Check if this chunk has all required layers in the bitmap
+            if (chunk_it != chunk_index_.end()) {
+                int layers_present = chunk_it->second.layer_bitmap.count();
+
+                // If bitmap shows all layers present, verify existence (bitmap might be stale)
+                if (layers_present >= n_layers) {
+                    bool verified = true;
+                    for (int32_t il = 0; il < n_layers; il++) {
+                        if (!chunk_it->second.layer_bitmap[il]) {
+                            verified = false;
+                            break;
+                        }
+
+                        // Verify in actual cache
+                        uint64_t hash = hash_key(hasher->make_key(tokens, len, chunk_start, il));
+                        if (l2_cache_.find(hash) == l2_cache_.end() &&
+                            l3_offsets_.find(hash) == l3_offsets_.end()) {
+                            verified = false;
+                            break;
+                        }
+                    }
+
+                    if (!verified) {
+                        all_chunks_match = false;
+                        break;  // This chunk doesn't have all layers, try shorter prefix
+                    }
+                    // All layers verified, continue to next chunk
+                    continue;
+                }
+            }
+
+            // Slow path: Bitmap not available or incomplete, fall back to original logic
             for (int32_t il = 0; il < n_layers; il++) {
                 auto key = hasher->make_key(tokens, len, chunk_start, il);
                 uint64_t hash = hash_key(key);
@@ -1370,6 +1428,8 @@ thunder_prefix_match ThunderChunkStorage::find_prefix_match(
             result.matched_tokens = len;
             result.matched_layers = n_layers;
             result.found = true;
+            fprintf(stderr, "[PREFIX-MATCH] Found prefix: %zu tokens (%zu chunks), %d layers\n",
+                len, chunk_count, n_layers);
             return result;
         }
     }

@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <list>
 #include <mutex>
+#include <bitset>
 
 /**
  * @brief Multi-tier storage manager for KV cache chunks.
@@ -34,6 +35,21 @@
  * Thread safety: All public methods are protected by internal mutex.
  * Multiple threads can safely call put/get/evict concurrently.
  */
+
+/**
+ * @brief Chunk-level index for fast prefix matching.
+ *
+ * Maintains a bitmap of which layers exist for each chunk (content_hash + chunk_start).
+ * This enables O(1) checking whether a chunk is complete (all layers present) before
+ * performing expensive hash lookups.
+ */
+struct ChunkInfo {
+    std::bitset<128> layer_bitmap;  // Bitmap of which layers exist (supports up to 128 layers)
+    uint64_t base_hash;             // Pre-computed hash for this chunk (content_hash ^ chunk_start)
+
+    ChunkInfo() : base_hash(0) {}
+};
+
 class ThunderChunkStorage {
 public:
     /**
@@ -278,6 +294,14 @@ private:
 
     // L3 enabled flag (false if disk unavailable or unmounted)
     bool l3_enabled_ = true;
+
+    // ========================================================================
+    // Chunk-Level Index (for fast prefix matching)
+    // ========================================================================
+
+    // Map: (content_hash ^ chunk_start) -> ChunkInfo
+    // Tracks which layers exist for each chunk to enable fast completeness checking
+    std::unordered_map<uint64_t, ChunkInfo> chunk_index_;
 
     // ========================================================================
     // Access Frequency Tracking (for smart prefetch)
