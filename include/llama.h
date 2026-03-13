@@ -964,11 +964,22 @@ extern "C" {
     LLAMA_API void llama_synchronize(struct llama_context * ctx);
 
     // Get LMCache statistics (Phase 2 monitoring)
-    // Returns: total_prefills, skip_count
+    // Returns: total_prefills, skip_count, approx_skip_count
     LLAMA_API void llama_get_lmcache_stats(
         const struct llama_context * ctx,
         uint64_t * total_prefills,
-        uint64_t * skip_count
+        uint64_t * skip_count,
+        uint64_t * approx_skip_count
+    );
+
+    // Get LMCache chunk storage statistics (Task 2.3)
+    // Returns: total_chunks, l2_usage_bytes, l3_usage_bytes, hit_rate
+    LLAMA_API void llama_get_chunk_storage_stats(
+        const struct llama_context * ctx,
+        uint64_t * total_chunks,
+        uint64_t * l2_usage_bytes,
+        uint64_t * l3_usage_bytes,
+        double * hit_rate
     );
 
     // Token logits obtained from the last call to llama_decode()

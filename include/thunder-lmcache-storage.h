@@ -158,6 +158,15 @@ public:
     double get_hit_rate() const;
 
     /**
+     * @brief Get total number of chunks in cache (L2 + L3).
+     *
+     * @return  Number of chunks currently stored.
+     *
+     * @note Thread-safe.
+     */
+    size_t get_total_chunks() const;
+
+    /**
      * @brief Safely unmount disk cache for external storage removal.
      *
      * Stops accepting new writes to L3, syncs all pending data, and closes disk file.

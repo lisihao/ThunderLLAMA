@@ -403,6 +403,11 @@ double ThunderChunkStorage::get_hit_rate() const {
     return total > 0 ? static_cast<double>(total_hits_) / total : 0.0;
 }
 
+size_t ThunderChunkStorage::get_total_chunks() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return l2_cache_.size() + l3_offsets_.size();
+}
+
 // ============================================================================
 // Private Methods
 // ============================================================================

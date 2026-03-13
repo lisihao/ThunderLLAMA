@@ -3229,27 +3229,38 @@ void server_routes::init_routes() {
         // Get real LMCache statistics from llama_context
         uint64_t total_prefills = 0;
         uint64_t skip_count = 0;
+        uint64_t approx_skip_count = 0;
+        uint64_t total_chunks = 0;
+        uint64_t l2_bytes = 0;
+        uint64_t l3_bytes = 0;
+        double storage_hit_rate = 0.0;
 
         auto * ctx = ctx_server.get_ctx();
         if (ctx) {
-            llama_get_lmcache_stats(ctx, &total_prefills, &skip_count);
+            llama_get_lmcache_stats(ctx, &total_prefills, &skip_count, &approx_skip_count);
+            llama_get_chunk_storage_stats(ctx, &total_chunks, &l2_bytes, &l3_bytes, &storage_hit_rate);
         }
 
-        // Calculate skip rate
+        // Calculate skip rates
         double skip_rate = 0.0;
+        double total_skip_rate = 0.0;
         if (total_prefills > 0) {
             skip_rate = (double)skip_count / (double)total_prefills;
+            total_skip_rate = (double)(skip_count + approx_skip_count) / (double)total_prefills;
         }
 
         res->ok({
             {"total_prefills", total_prefills},
             {"skip_count", skip_count},
+            {"approx_skip_count", approx_skip_count},
+            {"total_skip_count", skip_count + approx_skip_count},
             {"skip_rate", skip_rate},
-            {"l2_hit_rate", skip_rate},  // Use skip_rate as hit_rate for ClawGate compatibility
-            {"l2_chunks", 0},           // TODO: Get from ThunderChunkStorage
-            {"l2_usage_bytes", 0},      // TODO: Get from ThunderChunkStorage
-            {"l3_chunks", 0},           // TODO: Get from ThunderChunkStorage
-            {"l3_usage_bytes", 0}       // TODO: Get from ThunderChunkStorage
+            {"total_skip_rate", total_skip_rate},
+            {"l2_hit_rate", storage_hit_rate},  // Real hit rate from ThunderChunkStorage
+            {"l2_chunks", total_chunks},        // Real chunk count
+            {"l2_usage_bytes", l2_bytes},       // Real L2 (memory) usage
+            {"l3_chunks", total_chunks},        // Same as l2_chunks (total across both tiers)
+            {"l3_usage_bytes", l3_bytes}        // Real L3 (disk) usage
         });
 
         return res;

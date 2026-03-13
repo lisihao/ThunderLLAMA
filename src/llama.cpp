@@ -1176,14 +1176,35 @@ const char * llama_print_system_info(void) {
 void llama_get_lmcache_stats(
     const struct llama_context * ctx,
     uint64_t * total_prefills,
-    uint64_t * skip_count
+    uint64_t * skip_count,
+    uint64_t * approx_skip_count
 ) {
     if (!ctx) {
         if (total_prefills) *total_prefills = 0;
         if (skip_count) *skip_count = 0;
+        if (approx_skip_count) *approx_skip_count = 0;
         return;
     }
 
-    ctx->get_lmcache_stats(total_prefills, skip_count);
+    ctx->get_lmcache_stats(total_prefills, skip_count, approx_skip_count);
+}
+
+// Get LMCache chunk storage statistics (Task 2.3)
+void llama_get_chunk_storage_stats(
+    const struct llama_context * ctx,
+    uint64_t * total_chunks,
+    uint64_t * l2_usage_bytes,
+    uint64_t * l3_usage_bytes,
+    double * hit_rate
+) {
+    if (!ctx) {
+        if (total_chunks) *total_chunks = 0;
+        if (l2_usage_bytes) *l2_usage_bytes = 0;
+        if (l3_usage_bytes) *l3_usage_bytes = 0;
+        if (hit_rate) *hit_rate = 0.0;
+        return;
+    }
+
+    ctx->get_chunk_storage_stats(total_chunks, l2_usage_bytes, l3_usage_bytes, hit_rate);
 }
 

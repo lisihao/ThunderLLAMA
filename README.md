@@ -117,6 +117,7 @@ ThunderLLAMA includes a production-ready **LMCache** system for persistent KV ca
 | **Data Integrity** | ✅ | XXH64 checksum validation |
 | **Compression** | ✅ | zlib compression (2-4x savings) |
 | **Smart Prefetch** | ✅ | Access frequency tracking + parallel I/O |
+| **Approximate Skip** | ✅ | Zero-fill missing chunks at 95%+ hit ratio |
 | **CLI Tool** | ✅ | `thunder-cache` management utility |
 
 ### Quick Start

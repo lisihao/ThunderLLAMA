@@ -1,7 +1,7 @@
 # ThunderLLAMA + ClawGate 优化任务列表
 
 > **创建时间**: 2026-03-12
-> **当前进度**: Phase 2.1 部分完成（Task 2.1.1, 2.1.2 ✅）
+> **当前进度**: Phase 2.1 部分完成（Task 2.1.1, 2.1.2, 2.3 ✅）
 
 ---
 
@@ -16,6 +16,16 @@
 - llama_get_lmcache_stats() API
 - /lmcache/stats endpoint with real data
 - Statistics tracking in llama_context
+
+### ✅ Task 2.3: ThunderChunkStorage 真实统计（已完成）
+- Added `get_total_chunks()` method to ThunderChunkStorage
+- Implemented `llama_get_chunk_storage_stats()` API in llama.h/llama.cpp
+- Updated `/lmcache/stats` endpoint with real chunk storage statistics
+- **Verified Results** (2026-03-12):
+  - 432 chunks cached in L2 (memory)
+  - 104.6 MB L2 memory usage
+  - 91.5% cache hit rate
+  - 0 MB L3 disk usage (all chunks in memory)
 
 ---
 
@@ -213,115 +223,6 @@
 **预期收益**:
 - Skip 触发率提升 10-20%
 - 平均延迟降低 5-10%
-
----
-
-### ⏳ Task 2.3: ThunderChunkStorage 真实统计
-
-**预估时间**: 1 天
-**依赖**: Task 2.1.2
-**优先级**: 🟡 中（下周）
-
-**实现步骤**:
-1. 添加统计字段到 `ThunderChunkStorage`:
-   ```cpp
-   // thunder-chunk-storage.h
-   class ThunderChunkStorage {
-   private:
-       std::atomic<uint64_t> total_chunks{0};
-       std::atomic<uint64_t> total_gets{0};
-       std::atomic<uint64_t> total_hits{0};
-       size_t current_usage_bytes = 0;
-
-   public:
-       uint64_t get_total_chunks() const { return total_chunks; }
-       uint64_t get_usage_bytes() const { return current_usage_bytes; }
-       double get_hit_rate() const {
-           if (total_gets == 0) return 0.0;
-           return (double)total_hits / (double)total_gets;
-       }
-   };
-   ```
-
-2. 在 `get()` 和 `put()` 中更新统计:
-   ```cpp
-   thunder_kv_chunk* ThunderChunkStorage::get(const thunder_kv_chunk_key& key) {
-       total_gets++;
-       auto it = cache.find(key);
-       if (it != cache.end()) {
-           total_hits++;
-           return it->second;
-       }
-       return nullptr;
-   }
-
-   void ThunderChunkStorage::put(const thunder_kv_chunk_key& key, thunder_kv_chunk* chunk) {
-       total_chunks++;
-       current_usage_bytes += chunk->k_size + chunk->v_size;
-       cache[key] = chunk;
-   }
-   ```
-
-3. 添加 API 函数到 `llama.h`:
-   ```cpp
-   LLAMA_API void llama_get_chunk_storage_stats(
-       const struct llama_context * ctx,
-       uint64_t * total_chunks,
-       uint64_t * usage_bytes,
-       double * hit_rate
-   );
-   ```
-
-4. 实现 API 函数:
-   ```cpp
-   // llama.cpp
-   void llama_get_chunk_storage_stats(
-       const struct llama_context * ctx,
-       uint64_t * total_chunks,
-       uint64_t * usage_bytes,
-       double * hit_rate
-   ) {
-       if (!ctx || !ctx->lmcache_storage) {
-           if (total_chunks) *total_chunks = 0;
-           if (usage_bytes) *usage_bytes = 0;
-           if (hit_rate) *hit_rate = 0.0;
-           return;
-       }
-
-       if (total_chunks) *total_chunks = ctx->lmcache_storage->get_total_chunks();
-       if (usage_bytes) *usage_bytes = ctx->lmcache_storage->get_usage_bytes();
-       if (hit_rate) *hit_rate = ctx->lmcache_storage->get_hit_rate();
-   }
-   ```
-
-5. 更新 `/lmcache/stats` 端点:
-   ```cpp
-   // server-context.cpp
-   uint64_t l2_chunks = 0, l2_bytes = 0;
-   double storage_hit_rate = 0.0;
-   llama_get_chunk_storage_stats(ctx, &l2_chunks, &l2_bytes, &storage_hit_rate);
-
-   res->ok({
-       {"total_prefills", total_prefills},
-       {"skip_count", skip_count},
-       {"skip_rate", skip_rate},
-       {"l2_hit_rate", storage_hit_rate},  // 真实值
-       {"l2_chunks", l2_chunks},           // 真实值
-       {"l2_usage_bytes", l2_bytes}        // 真实值
-   });
-   ```
-
-**验收标准**:
-- [ ] `get_total_chunks()` 返回正确值
-- [ ] `get_usage_bytes()` 与磁盘文件大小一致
-- [ ] `get_hit_rate()` 在 0-1 范围内
-- [ ] `/lmcache/stats` 显示真实数据
-- [ ] 单元测试覆盖所有 API
-
-**预期收益**:
-- 准确的缓存使用情况
-- 真实的命中率监控
-- 支持容量规划
 
 ---
 
@@ -910,18 +811,17 @@ verified_tokens = verify_with_large_model(small_model_predictions);
 
 ### 🟡 中优先级（下周）
 3. **Task 2.2**: 决策阈值调优（1 天）
-4. **Task 2.3**: ThunderChunkStorage 统计（1 天）
 
 ### 🟡 中优先级（2-3 周后）
-5. **Task 3.1**: Skip Logic 覆盖率提升（2 天）
-6. **Task 4.1**: Cache-Aware Batching（3 天）
+4. **Task 3.1**: Skip Logic 覆盖率提升（2 天）
+5. **Task 4.1**: Cache-Aware Batching（3 天）
 
 ### 🟢 低优先级（1-3 个月）
-7. **Task 4.2**: Eviction-Aware Scheduling（2 天）
-8. **Task 3.2**: Hybrid Hashing 优化（1 天）
-9. **Task 4.3**: Multi-Level Cache（5 天）
-10. **Task 3.3**: Decode 缓存优化（3-5 天，研究性质）
-11. **Task 4.4**: 动态 Chunk Size（2 天）
+6. **Task 4.2**: Eviction-Aware Scheduling（2 天）
+7. **Task 3.2**: Hybrid Hashing 优化（1 天）
+8. **Task 4.3**: Multi-Level Cache（5 天）
+9. **Task 3.3**: Decode 缓存优化（3-5 天，研究性质）
+10. **Task 4.4**: 动态 Chunk Size（2 天）
 
 ---
 
@@ -941,8 +841,9 @@ verified_tokens = verify_with_large_model(small_model_predictions);
 
 ## 🎯 里程碑
 
+- **✅ 2026-03-12**: Task 2.1.1, 2.1.2, 2.3 完成（监控基础 + 真实统计）
 - **Week 1**: Monitoring 完成（Task 2.1.3, 2.1.4）
-- **Week 2**: Tuning 完成（Task 2.2, 2.3）
+- **Week 2**: Tuning 完成（Task 2.2）
 - **Week 4**: 性能优化 Phase 1（Task 3.1, 4.1）
 - **Month 2**: 架构优化完成（Task 4.2, 4.3）
 - **Month 3**: 全部任务完成

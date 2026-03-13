@@ -208,9 +208,31 @@ struct llama_context {
     //
     // LMCache statistics (Phase 2)
     //
-    void get_lmcache_stats(uint64_t * total_prefills, uint64_t * skip_count) const {
+    void get_lmcache_stats(uint64_t * total_prefills, uint64_t * skip_count, uint64_t * approx_skip_count) const {
         if (total_prefills) *total_prefills = lmcache_total_prefills;
         if (skip_count) *skip_count = lmcache_skip_count;
+        if (approx_skip_count) *approx_skip_count = lmcache_approx_skip_count;
+    }
+
+    // Get chunk storage statistics (Task 2.3)
+    void get_chunk_storage_stats(
+        uint64_t * total_chunks,
+        uint64_t * l2_usage_bytes,
+        uint64_t * l3_usage_bytes,
+        double * hit_rate
+    ) const {
+        if (!lmcache_storage) {
+            if (total_chunks) *total_chunks = 0;
+            if (l2_usage_bytes) *l2_usage_bytes = 0;
+            if (l3_usage_bytes) *l3_usage_bytes = 0;
+            if (hit_rate) *hit_rate = 0.0;
+            return;
+        }
+
+        if (total_chunks) *total_chunks = lmcache_storage->get_total_chunks();
+        if (l2_usage_bytes) *l2_usage_bytes = lmcache_storage->get_cpu_usage_bytes();
+        if (l3_usage_bytes) *l3_usage_bytes = lmcache_storage->get_disk_usage_bytes();
+        if (hit_rate) *hit_rate = lmcache_storage->get_hit_rate();
     }
 
 private:
@@ -382,4 +404,5 @@ private:
     // Statistics for monitoring (Phase 2)
     mutable uint64_t lmcache_total_prefills = 0;  // Total number of prefill operations
     mutable uint64_t lmcache_skip_count = 0;      // Number of skipped forward passes
+    mutable uint64_t lmcache_approx_skip_count = 0;  // Approximate skip count (Phase 1)
 };

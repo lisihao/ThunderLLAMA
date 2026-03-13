@@ -20,6 +20,18 @@
 extern "C" void thunder_lmcache_register_storage(void* storage);
 extern "C" void thunder_lmcache_unregister_storage();
 
+// Approximate skip configuration
+constexpr double APPROX_SKIP_THRESHOLD = 0.95;  // 95% hit ratio threshold for approximate skip
+
+// Missing chunk info for approximate skip
+struct MissingChunkInfo {
+    int32_t layer_idx;
+    size_t chunk_start;
+    size_t chunk_size;
+    ggml_tensor* k_tensor;
+    ggml_tensor* v_tensor;
+};
+
 //
 // llama_context
 //
@@ -1234,6 +1246,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
             if (kv_cache) {
                 const int32_t n_layer = kv_cache->get_n_layer();
+                std::vector<MissingChunkInfo> missing_chunks;
 
                 // Loop through all layers
                 for (int32_t il = 0; il < n_layer; il++) {
@@ -1297,22 +1310,54 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                                 fprintf(stderr, "LMCache RESTORED: layer=%d, chunk_start=%zu, bytes=%zu (total_found=%d)\n",
                                         il, chunk_start, chunk_bytes, lmcache_chunks_found);
                             }
+                        } else {
+                            // Record missing chunk for approximate skip
+                            missing_chunks.push_back({
+                                il,
+                                chunk_start,
+                                std::min((size_t)THUNDER_CHUNK_SIZE, kv_end_pos_before - chunk_start),
+                                k_tensor,
+                                kv_cache->get_layer_v(il)
+                            });
                         }
                     }
                 }
 
-                // Check if we can skip computation (all chunks found in cache)
+                // Check if we can skip computation
                 fflush(stderr);  // Ensure RESTORED logs are flushed first
                 fprintf(stderr, "[DEBUG] Before check: is_prefill=%d, chunks_needed=%d, chunks_found=%d\n",
                         is_prefill, lmcache_chunks_needed, lmcache_chunks_found);
                 fflush(stderr);
 
-                if (is_prefill && lmcache_chunks_needed > 0 &&
-                    lmcache_chunks_found == lmcache_chunks_needed) {
-                    lmcache_can_skip_compute = true;
-                    lmcache_skip_count++;  // Track skip for statistics
-                    fprintf(stderr, "🚀 LMCache FULL HIT: %d/%d chunks cached, SKIPPING forward pass!\n",
-                            lmcache_chunks_found, lmcache_chunks_needed);
+                if (is_prefill && lmcache_chunks_needed > 0) {
+                    double hit_ratio = (double)lmcache_chunks_found / (double)lmcache_chunks_needed;
+
+                    if (lmcache_chunks_found == lmcache_chunks_needed) {
+                        // 100% hit: Full skip
+                        lmcache_can_skip_compute = true;
+                        lmcache_skip_count++;
+                        fprintf(stderr, "🚀 LMCache FULL HIT: %d/%d chunks, SKIPPING forward pass!\n",
+                                lmcache_chunks_found, lmcache_chunks_needed);
+                    } else if (hit_ratio >= APPROX_SKIP_THRESHOLD) {
+                        // 95%+ hit: Approximate skip with zero-filling
+                        // Fill missing KV chunks with zeros
+                        for (const auto& missing : missing_chunks) {
+                            const size_t n_embd_k = missing.k_tensor->ne[0];
+                            const size_t element_size = ggml_element_size(missing.k_tensor);
+                            const size_t offset = missing.chunk_start * n_embd_k * element_size;
+                            const size_t chunk_bytes = missing.chunk_size * n_embd_k * element_size;
+
+                            // Zero-fill missing chunks
+                            std::vector<uint8_t> zeros(chunk_bytes, 0);
+                            ggml_backend_tensor_set(missing.k_tensor, zeros.data(), offset, chunk_bytes);
+                            ggml_backend_tensor_set(missing.v_tensor, zeros.data(), offset, chunk_bytes);
+                        }
+
+                        lmcache_can_skip_compute = true;
+                        lmcache_approx_skip_count++;
+                        fprintf(stderr, "⚡ LMCache APPROX SKIP: %.1f%% hit (%d/%d), filled %zu missing chunks with zeros\n",
+                                hit_ratio * 100.0, lmcache_chunks_found, lmcache_chunks_needed, missing_chunks.size());
+                    }
                 }
             }
         }
