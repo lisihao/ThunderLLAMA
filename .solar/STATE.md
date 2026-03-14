@@ -1,59 +1,43 @@
 # Mission
-恢复 ThunderLLAMA + LMCache 集成的 3-4x 性能提升（崩溃前已测试通过）
+ThunderLLAMA 性能优化 — Metal MoE Kernel Fusion + 全套调优
 
 # Constraints
 - 不破坏现有 Clawgate + ThunderLLAMA 集成
-- L3 缓存必须在 Toshiba volume 上（/Volumes/toshiba/lmcache.bin）
-- 配置文件统一在 ~/.openclaw/config.yaml
+- 配置文件 (thunderllama.conf) 是唯一真相源
+- 正确性优先：输出必须与未优化版本 bit-identical
 
 # Current Plan
-1. ✅ 找到 LMCache 缓存文件位置：/Volumes/toshiba/lmcache.bin（1.0MB，存在）
-2. ✅ 更新配置文件：disk_path 指向 Toshiba
-3. ⏳ 用正确配置重新测试性能（benchmark_lmcache_proper.py，2000+ tokens）
-4. ⏳ 验证是否能复现 3-4x 性能提升
-5. ⏳ 对比 baseline vs lmcache 的性能数据
+1. ✅ Tier 1: CPU 线程分离 + KV cache f16 优化 (TG: 59→66.36)
+2. ✅ Tier 2: Q4_K_M 量化 (TG: 66.36→75.90, 纯带宽瓶颈)
+3. ✅ Tier 3: Metal MoE Kernel Fusion (TG: 59→65 Q5_K, 70→79 Q4_K)
+4. ⏳ 进一步优化：Normalization chain fusion（需要 graph 调度器改动）
 
 # Decisions
-- [2026-03-12] L3 缓存放在 Toshiba 外置硬盘（745GB 可用空间）而不是本地 SSD：容量大、性能够用
-- [2026-03-12] 配置文件集中到 ~/.openclaw/config.yaml：统一管理 ThunderLLAMA 和 Clawgate
+- [2026-03-15] MoE Fusion 只融合 gating 链 (SOFT_MAX→ARGSORT→GET_ROWS)，不融合 normalization chain：graph scheduler 将 MUL_MAT_ID 插在 GET_ROWS 和 SUM_ROWS 之间，无法相邻融合
+- [2026-03-15] METAL_FUSION 配置项加入 thunderllama.conf：通过 GGML_METAL_FUSION_DISABLE 环境变量控制
+- [2026-03-14] N_R0_Q5_K=8 编译时常量：7 组实测确认甜区
+- [2026-03-14] KV cache 用 f16 而非 q4_0/q8_0：短上下文下反量化开销 > 带宽节省
+- [2026-03-14] TG 用 4 线程、PP 用 8 线程：分离配置减少 GPU 带宽争抢
 
 # Progress
 
 ## Done
-- ✅ 定位问题：缓存文件路径配置错误（~/.openclaw vs /Volumes/toshiba）
-- ✅ 找到正确的测试脚本：benchmark_lmcache_proper.py（2000+ tokens prompt）
-- ✅ 更新配置文件：disk_path = "/Volumes/toshiba/lmcache.bin"
-- ✅ 确认 LMCache v3.0 代码完整（commit 8c47e1de9）
+- ✅ Metal MoE Kernel Fusion 实现 (build 8389)
+  - kernel_topk_moe_f32: simdgroup softmax + iterative top-8 argmax
+  - 3-op fusion: SOFT_MAX → ARGSORT → GET_ROWS
+  - 48 层 × 减少 2 dispatches = 96 dispatches eliminated
+  - A/B 正确性验证: 输出 byte-identical
+- ✅ Q5_K_M 全套优化: TG=65.25±0.16, PP=729.47±6.80 (10-run)
+- ✅ Q4_K_M 全套优化: TG=79.12±0.20, PP=787.50±6.14 (5-run)
+- ✅ thunderllama.conf 更新: METAL_FUSION 配置项 + 性能基准刷新
+- ✅ config-parser.h 更新: METAL_FUSION → GGML_METAL_FUSION_DISABLE 映射
+- ✅ OPTIMIZATION_FEATURES.md 更新: Metal Kernel Fusion + 性能基准
 
 ## In-Progress
-- 🔄 重新运行性能测试
-
-## Blocked
 - 无
 
-# Next Actions
-```bash
-# 1. 启动 ThunderLLAMA server（使用 Toshiba L3 缓存）
-cd /Users/lisihao/ThunderLLAMA
-THUNDER_LMCACHE=1 THUNDER_LMCACHE_DISK_PATH="/Volumes/toshiba/lmcache.bin" \
-./build/bin/llama-server \
-  -m /Users/lisihao/models/qwen3-30b-a3b-gguf/Qwen3-30B-A3B-128K-Q5_K_M.gguf \
-  -ngl 20 -c 8192 -t 8 --port 30000 -np 4
-
-# 2. 运行性能测试（2000+ tokens prompt）
-cd /Users/lisihao/ThunderLLAMA/clawgate-integration
-python3 benchmark_lmcache_proper.py
-
-# 3. 验证性能提升
-# 预期：Round 2/3 的平均延迟比 Round 1 低 3-4x
-```
-
-# 关键发现
-1. **LMCache 缓存文件存在**：/Volumes/toshiba/lmcache.bin（1.0MB）
-2. **配置路径不匹配问题**：config.yaml 中原本是 ~/.openclaw/lmcache.bin，实际文件在 Toshiba
-3. **测试脚本正确**：benchmark_lmcache_proper.py 使用 ~1500 tokens 工具定义 + 任务描述
-4. **代码完整**：LMCache v3.0（K tensor 缓存已实现，V tensor 跳过）
-5. **崩溃前测试结果丢失**：没有保存到文件，compact 后无法恢复
+## Blocked
+- Normalization chain (SUM_ROWS→CLAMP→DIV) 融合受 graph scheduler 限制
 
 # 风险点
 - ⚠️ 如果重新测试无法复现 3-4x 提升，可能需要检查：

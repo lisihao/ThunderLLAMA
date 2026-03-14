@@ -1092,4 +1092,14 @@ typedef struct {
     int64_t  np;
 } ggml_metal_kargs_opt_step_sgd;
 
+// Fused top-k MoE gating: softmax → top-k argmax → optional weight normalization
+typedef struct {
+    int32_t  ne00;       // n_expert (e.g. 128)
+    int32_t  ne01;       // n_tokens
+    int32_t  n_used;     // n_expert_used (e.g. 8)
+    int32_t  id_stride;  // stride for ids per row (= n_expert, for argsort layout)
+    float    clamp_min;  // min clamp for weight normalization (e.g. 6.103515625e-5)
+    int32_t  norm;       // whether to normalize weights (0 or 1)
+} ggml_metal_kargs_topk_moe;
+
 #endif // GGML_METAL_IMPL

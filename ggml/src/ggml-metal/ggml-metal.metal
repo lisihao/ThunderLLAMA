@@ -10212,3 +10212,163 @@ kernel void kernel_count_equal(
 typedef decltype(kernel_count_equal<int32_t>) kernel_count_equal_t;
 
 template [[host_name("kernel_count_equal_i32")]] kernel kernel_count_equal_t kernel_count_equal<int32_t>;
+
+// Fused top-k MoE gating kernel
+// Replaces: SOFT_MAX → ARGSORT → GET_ROWS → [SUM_ROWS → CLAMP → DIV]
+// Input:  logits [n_expert, n_tokens] (pre-softmax gating values)
+// Output: weights [n_expert_used, n_tokens] (selected expert weights, optionally normalized)
+//         ids [n_expert, n_tokens] (top-k expert indices written to first n_expert_used per row)
+//
+// Each threadgroup processes 1 token using 1 simdgroup (32 threads).
+// Each thread handles n_expert/32 expert values.
+// Supports n_expert up to 256 (8 values per thread).
+kernel void kernel_topk_moe_f32(
+        constant ggml_metal_kargs_topk_moe & args,
+        device const char * src0,
+        device       char * dst0,
+        device       char * dst1,
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint tiisg [[thread_index_in_simdgroup]]) {
+
+    const int row = tgpig;
+    if (row >= args.ne01) {
+        return;
+    }
+
+    const int n_expert = args.ne00;
+    const int n_used   = args.n_used;
+    const int lane     = tiisg;
+
+    // experts per thread: ceil(n_expert / 32)
+    const int ept = (n_expert + 31) / 32;
+
+    device const float * logits  = (device const float *)(src0 + (int64_t)row * n_expert * sizeof(float));
+    device       float * weights = (device       float *)(dst0 + (int64_t)row * n_used   * sizeof(float));
+    device     int32_t * ids     = (device     int32_t *)(dst1 + (int64_t)row * args.id_stride * sizeof(int32_t));
+
+    // Load expert logits into registers (max 8 per thread for n_expert <= 256)
+    float wt[8];
+    for (int i = 0; i < 8; i++) {
+        wt[i] = -FLT_MAX;
+    }
+
+    for (int i = 0; i < ept; i++) {
+        const int expert = lane + i * 32;
+        if (expert < n_expert) {
+            wt[i] = logits[expert];
+        }
+    }
+
+    // --- Softmax ---
+
+    // Step 1: find max across all experts
+    float smax = wt[0];
+    for (int i = 1; i < ept; i++) {
+        smax = max(smax, wt[i]);
+    }
+    smax = simd_max(smax);
+
+    // Step 2: exp(x - max) and sum
+    float ssum = 0.0f;
+    for (int i = 0; i < ept; i++) {
+        const int expert = lane + i * 32;
+        if (expert < n_expert) {
+            wt[i] = exp(wt[i] - smax);
+            ssum += wt[i];
+        } else {
+            wt[i] = 0.0f;
+        }
+    }
+    ssum = simd_sum(ssum);
+
+    // Step 3: normalize
+    const float inv_ssum = 1.0f / ssum;
+    for (int i = 0; i < ept; i++) {
+        wt[i] *= inv_ssum;
+    }
+
+    // Sanitize NaN → -FLT_MAX (prevents same expert selected repeatedly)
+    for (int i = 0; i < ept; i++) {
+        if (isnan(wt[i])) {
+            wt[i] = -FLT_MAX;
+        }
+    }
+
+    // --- Iterative top-k selection ---
+
+    float wt_norm_sum = 0.0f;
+
+    // output_weights: thread k stores the k-th selected weight (k < 32 for typical MoE)
+    float output_weights[8];
+    for (int i = 0; i < 8; i++) {
+        output_weights[i] = 0.0f;
+    }
+
+    for (int k = 0; k < n_used; k++) {
+        // Find local max across this thread's experts
+        float local_max = wt[0];
+        int   local_expert = lane;
+
+        for (int i = 1; i < ept; i++) {
+            const int expert = lane + i * 32;
+            if ((n_expert % 32 == 0 || expert < n_expert) && wt[i] > local_max) {
+                local_max = wt[i];
+                local_expert = expert;
+            }
+        }
+
+        // Simdgroup argmax reduction
+        for (ushort mask = 16; mask > 0; mask >>= 1) {
+            const float other_val    = simd_shuffle_xor(local_max, mask);
+            const int   other_expert = simd_shuffle_xor(local_expert, mask);
+            if (other_val > local_max || (other_val == local_max && other_expert < local_expert)) {
+                local_max    = other_val;
+                local_expert = other_expert;
+            }
+        }
+
+        // Now all threads have the same max_expert and max_val
+        const int   max_expert = local_expert;
+        const float max_val    = local_max;
+
+        // Mark selected expert as -INF so it won't be selected again
+        if ((max_expert & 31) == (int)lane) {
+            const int slot = max_expert / 32;
+            if (args.norm) {
+                wt_norm_sum += wt[slot];
+            }
+            wt[slot] = -INFINITY;
+        }
+
+        // Thread k stores the k-th weight
+        if ((k & 31) == (int)lane) {
+            output_weights[k / 32] = max_val;
+        }
+
+        // Thread 0 writes the expert id
+        if (lane == 0) {
+            ids[k] = max_expert;
+        }
+    }
+
+    // --- Optional weight normalization ---
+
+    if (args.norm) {
+        wt_norm_sum = simd_sum(wt_norm_sum);
+        wt_norm_sum = max(wt_norm_sum, args.clamp_min);
+        const float inv_norm = 1.0f / wt_norm_sum;
+
+        for (int i = 0; i < (n_used + 31) / 32; i++) {
+            output_weights[i] *= inv_norm;
+        }
+    }
+
+    // --- Write output weights ---
+
+    for (int i = 0; i < (n_used + 31) / 32; i++) {
+        const int idx = i * 32 + lane;
+        if (idx < n_used) {
+            weights[idx] = output_weights[i];
+        }
+    }
+}

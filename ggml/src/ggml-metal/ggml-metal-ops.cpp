@@ -318,6 +318,13 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             } break;
         case GGML_OP_SOFT_MAX:
             {
+                if (ctx->use_fusion) {
+                    int n = ggml_metal_op_topk_moe(ctx, idx);
+                    if (n > 0) {
+                        n_fuse = n;
+                        break;
+                    }
+                }
                 n_fuse = ggml_metal_op_soft_max(ctx, idx);
             } break;
         case GGML_OP_SSM_CONV:
@@ -4458,4 +4465,150 @@ int ggml_metal_op_count_equal(ggml_metal_op_t ctx, int idx) {
     }
 
     return 1;
+}
+
+// Helper: trace through RESHAPE/VIEW chains to find the origin tensor
+static ggml_tensor * ggml_metal_trace_origin(ggml_tensor * t) {
+    while (t && (t->op == GGML_OP_RESHAPE || t->op == GGML_OP_VIEW)) {
+        t = t->src[0];
+    }
+    return t;
+}
+
+// Fused top-k MoE gating kernel
+// Detects and fuses the pattern: SOFT_MAX → ARGSORT → GET_ROWS → [SUM_ROWS → CLAMP → DIV]
+// Returns n_fuse (number of nodes consumed) or 0 if pattern doesn't match
+int ggml_metal_op_topk_moe(ggml_metal_op_t ctx, int idx) {
+    // Need at least SOFT_MAX + ARGSORT + GET_ROWS = 3 nodes
+    if (idx + 2 >= ctx->n_nodes()) {
+        return 0;
+    }
+
+    ggml_tensor * soft_max = ctx->node(idx);
+    ggml_tensor * argsort  = ctx->node(idx + 1);
+    ggml_tensor * get_rows = ctx->node(idx + 2);
+
+    // Verify basic op sequence
+    if (soft_max->op != GGML_OP_SOFT_MAX) return 0;
+    if (argsort->op  != GGML_OP_ARGSORT)  return 0;
+    if (get_rows->op != GGML_OP_GET_ROWS) return 0;
+
+    // Verify SOFT_MAX is standard (scale=1.0, no bias/mask)
+    float scale = 1.0f, max_bias = 0.0f;
+    memcpy(&scale,    ((const int32_t *) soft_max->op_params) + 0, sizeof(float));
+    memcpy(&max_bias, ((const int32_t *) soft_max->op_params) + 1, sizeof(float));
+    if (scale != 1.0f || max_bias != 0.0f) return 0;
+    if (soft_max->src[1] || soft_max->src[2]) return 0;  // no mask or sink
+
+    // Verify logits are contiguous
+    ggml_tensor * logits = soft_max->src[0];
+    if (!ggml_is_contiguous(logits)) return 0;
+
+    const int n_expert = (int)logits->ne[0];
+    const int n_tokens = (int)logits->ne[1];
+
+    // Only support power-of-2 expert counts up to 256
+    if (n_expert > 256 || n_expert < 2) return 0;
+    if ((n_expert & (n_expert - 1)) != 0) return 0;
+
+    // Verify ARGSORT's input traces back to SOFT_MAX
+    ggml_tensor * argsort_origin = ggml_metal_trace_origin(argsort->src[0]);
+    if (argsort_origin != soft_max) return 0;
+
+    // Verify GET_ROWS connections:
+    // src[0] should trace to soft_max (through RESHAPE)
+    // src[1] should trace to argsort (through VIEW)
+    ggml_tensor * get_rows_src0_origin = ggml_metal_trace_origin(get_rows->src[0]);
+    if (get_rows_src0_origin != soft_max) return 0;
+
+    ggml_tensor * get_rows_src1_origin = ggml_metal_trace_origin(get_rows->src[1]);
+    if (get_rows_src1_origin != argsort) return 0;
+
+    // Get n_expert_used from the VIEW (src[1] of GET_ROWS)
+    const int n_expert_used = (int)get_rows->src[1]->ne[0];
+    if (n_expert_used < 1 || n_expert_used > n_expert) return 0;
+
+    // Check for normalization: SUM_ROWS → CLAMP → DIV
+    bool has_norm = false;
+    int n_fuse = 3;  // SOFT_MAX + ARGSORT + GET_ROWS
+    float clamp_min = 0.0f;
+
+    ggml_tensor * weights_out = get_rows;  // default: weights = GET_ROWS output
+
+    if (idx + 5 < ctx->n_nodes()) {
+        ggml_tensor * sum_rows_node = ctx->node(idx + 3);
+        ggml_tensor * clamp_node    = ctx->node(idx + 4);
+        ggml_tensor * div_node      = ctx->node(idx + 5);
+
+        if (sum_rows_node->op == GGML_OP_SUM_ROWS &&
+            clamp_node->op    == GGML_OP_CLAMP &&
+            div_node->op      == GGML_OP_DIV) {
+
+            // Verify SUM_ROWS input traces to GET_ROWS
+            ggml_tensor * sum_origin = ggml_metal_trace_origin(sum_rows_node->src[0]);
+            if (sum_origin == get_rows) {
+                // Verify CLAMP input is SUM_ROWS
+                if (clamp_node->src[0] == sum_rows_node) {
+                    // Verify DIV: src[0] traces to GET_ROWS, src[1] = CLAMP
+                    ggml_tensor * div_src0_origin = ggml_metal_trace_origin(div_node->src[0]);
+                    if (div_src0_origin == get_rows && div_node->src[1] == clamp_node) {
+                        has_norm = true;
+                        n_fuse = 6;
+                        weights_out = div_node;
+
+                        // Extract clamp_min from CLAMP op params
+                        memcpy(&clamp_min, clamp_node->op_params, sizeof(float));
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Encode the fused kernel ---
+
+    if (ctx->debug_fusion > 0) {
+        GGML_LOG_DEBUG("%s: fuse: TOPK_MOE n_expert=%d n_used=%d norm=%d n_fuse=%d tokens=%d\n",
+                       __func__, n_expert, n_expert_used, has_norm, n_fuse, n_tokens);
+    }
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    ggml_metal_kargs_topk_moe args = {
+        /*.ne00      =*/ n_expert,
+        /*.ne01      =*/ n_tokens,
+        /*.n_used    =*/ n_expert_used,
+        /*.id_stride =*/ n_expert,  // argsort output stride per row
+        /*.clamp_min =*/ clamp_min,
+        /*.norm      =*/ has_norm ? 1 : 0,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_topk_moe(lib);
+    if (!pipeline.pipeline) {
+        GGML_LOG_ERROR("%s: failed to get topk_moe pipeline\n", __func__);
+        return 0;
+    }
+
+    ggml_metal_buffer_id bid_logits  = ggml_metal_get_buffer_id(logits);
+    ggml_metal_buffer_id bid_weights = ggml_metal_get_buffer_id(weights_out);
+    ggml_metal_buffer_id bid_ids     = ggml_metal_get_buffer_id(argsort);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, bid_logits,  1);
+    ggml_metal_encoder_set_buffer  (enc, bid_weights, 2);
+    ggml_metal_encoder_set_buffer  (enc, bid_ids,     3);
+
+    // 1 simdgroup (32 threads) per token
+    ggml_metal_encoder_dispatch_threadgroups(enc, n_tokens, 1, 1, 32, 1, 1);
+
+    // Check concurrency for fused nodes
+    for (int i = 1; i < n_fuse; ++i) {
+        if (!ggml_metal_op_concurrency_check(ctx, ctx->node(idx + i))) {
+            ggml_metal_op_concurrency_reset(ctx);
+            break;
+        }
+    }
+
+    return n_fuse;
 }

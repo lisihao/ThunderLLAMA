@@ -57,12 +57,14 @@
 | **Batch Size** | `-b N` | `2048` | 逻辑批大小 | 影响吞吐上限 | llama.cpp |
 | **Micro Batch** | `-ub N` | `512` | 物理批大小 | GPU 利用率 | llama.cpp |
 
-## 5. 硬件加速优化（4项）
+## 5. 硬件加速优化（6项）
 
 | 优化项 | 启用方式 | 默认值 | 作用 | 性能提升 | 来源 |
 |--------|---------|--------|------|---------|------|
 | **GPU Layers** | `-ngl 99` | `auto` | 卸载层数到 GPU | M4: 3-5x vs CPU | llama.cpp |
 | **Metal 优化** | 自动启用 (macOS) | - | Apple Silicon GPU 加速 | 自动优化 | llama.cpp |
+| **Metal Kernel Fusion** | `METAL_FUSION=1` | 启用 | ADD 融合 + MoE Gating 融合 | **TG +10-12%** | ThunderLLAMA |
+| **N_R0_Q5_K 调优** | 编译时 | `8` | Q5_K 每 simdgroup 处理行数 | **TG +2-3%** | ThunderLLAMA |
 | **CPU 线程** | `-t N` | `-1` (auto) | CPU 推理线程数 | 少量层用 CPU 时有效 | llama.cpp |
 | **Batch 线程** | `-tb N` | 同 `-t` | Prompt 处理线程数 | Prompt 阶段加速 | llama.cpp |
 
@@ -92,6 +94,7 @@
 | `THUNDER_LMCACHE_DISK_PATH` | L3 磁盘缓存路径 | `~/.cache/thunderllama/kv_cache.bin` | `src/thunder-lmcache-storage.cpp:32` |
 | `THUNDERLLAMA_CHUNK_PREFILL` | 自适应分块大小 | `max(32, n_batch/slots)` | `tools/server/server-context.cpp:2120` |
 | `LLAMA_PAGED_ATTENTION` | 启用 Paged Attention | `0` | `src/llama-context.cpp:293` |
+| `GGML_METAL_FUSION_DISABLE` | 禁用 Metal 内核融合 | 未设置(启用) | `ggml/src/ggml-metal/ggml-metal-context.m` |
 
 ---
 
@@ -204,13 +207,31 @@ curl http://localhost:8080/lmcache/stats
 | **Attention 机制** | 2 |
 | **KV Cache 优化** | 7 |
 | **并发批处理** | 4 |
-| **硬件加速** | 4 |
+| **硬件加速** | 6 |
 | **内存管理** | 4 |
 | **推测优化** | 2 |
-| **总计** | **32 个可用优化项** |
+| **总计** | **34 个可用优化项** |
 
 ---
 
-**文档版本**: v1.0
-**更新日期**: 2026-03-12
+## 性能基准 (M4 Pro, 2026-03-15)
+
+### Qwen3-30B-A3B (全套优化: FA=1, Fusion=1, t=4)
+
+| 量化 | 大小 | PP512 (tok/s) | TG128 (tok/s) |
+|------|------|:------------:|:------------:|
+| **Q5_K_M** | 20.23 GiB | 729.47 ± 6.80 | **65.25 ± 0.16** |
+| **Q4_K_M** | 17.28 GiB | 787.50 ± 6.14 | **79.12 ± 0.20** |
+
+### Metal Kernel Fusion 提速效果
+
+| 量化 | 无融合 | 有融合 | 提升 |
+|------|:------:|:-----:|:----:|
+| Q5_K_M | 59.07 | 65.25 | **+10.5%** |
+| Q4_K_M | 70.35 | 79.12 | **+12.5%** |
+
+---
+
+**文档版本**: v1.1
+**更新日期**: 2026-03-15
 **验证方式**: 代码扫描 + 文档审查

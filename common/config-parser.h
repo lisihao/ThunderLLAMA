@@ -312,6 +312,12 @@ inline bool thunderllama_config_load_and_apply(common_params & params, const std
         setenv("GGML_METAL_MAX_BUFFER_SIZE", metal_buffer.c_str(), 1);
     }
 
+    // METAL_FUSION (Metal kernel fusion: ADD fusion + MoE gating fusion)
+    // Default: enabled (1). Set to 0 to disable for debugging.
+    if (!config.get_bool("METAL_FUSION", true)) {
+        setenv("GGML_METAL_FUSION_DISABLE", "1", 1);
+    }
+
     // === Apply params ===
     thunderllama_config_apply(params, config);
 
