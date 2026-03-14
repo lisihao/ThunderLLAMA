@@ -16,12 +16,20 @@
 
 | 场景 | 性能提升 | 说明 |
 |------|---------|------|
+| **Metal 内核优化** | **75.9 tok/s TG** | Q4_K_M, FA=1, 分离线程配置 |
 | **多轮对话（L2 缓存）** | **10-60x** | 内存缓存命中，极速响应 |
 | **跨会话恢复（L3 缓存）** | **22-33x** | 磁盘持久化，重启不丢失 |
 | **端到端延迟优化** | **67%** ⬇️ | ClawGate + ContextPilot 集成 |
 | **长上下文支持** | **8GB + 256GB** | L2 内存 + L3 磁盘容量 |
 
-**真实测试数据**（Qwen3-30B-A3B, M3 Max）：
+**吞吐量基准**（Qwen3-30B-A3B, M4 Pro 48GB, 10-run 稳定测量）：
+
+| 量化 | PP512 (tok/s) | TG128 (tok/s) | 模型大小 | BPW |
+|------|:------------:|:------------:|:-------:|:---:|
+| **Q5_K_M** | 718.37 ± 12.52 | 66.36 ± 0.20 | 20.23 GiB | 5.69 |
+| **Q4_K_M** | 766.84 ± 4.33 | **75.90 ± 0.23** | 17.28 GiB | 4.86 |
+
+**缓存基准**（Qwen3-30B-A3B, M3 Max）：
 ```
 Cold Start:  424ms  →  Warm Cache:  40ms  (10.6x faster)
              594ms  →  ContextPilot: 197ms (67% latency reduction)
@@ -84,7 +92,26 @@ Scenario       | Cold Start | Warm (L2)  | Disk (L3)  | Speedup
 
 ---
 
-### 3️⃣ ContextPilot 集成
+### 3️⃣ Metal 内核深度调优
+
+**配置文件驱动**：所有优化参数通过 `thunderllama.conf` 统一管理，代码级强制。
+
+**已完成的优化**：
+| 优化 | 改动 | 效果 |
+|------|------|------|
+| N_R0_Q5_K=8 | Metal 内核每 simdgroup 处理 8 行 | +2-3% TG |
+| KV Cache f16 | 短上下文下反量化开销 > 带宽节省 | +5% TG |
+| CPU 线程分离 | TG=4 线程（减少 GPU 带宽争抢），PP=8 线程 | +1.1% TG, +2.7% PP |
+| Q4_K_M 量化 | 模型缩小 14.6%，纯带宽瓶颈 | +14.4% TG |
+
+**已验证无效的优化**：
+- Speculative Decoding（Draft Model）：30B 验证成本高，质量下降
+- N-gram Speculative Decoding：对大模型帮助有限
+- ne11_mm_min 阈值调优：仅影响 batch size 2-8，对 TG/PP 无效
+
+---
+
+### 4️⃣ ContextPilot 集成
 
 **端到端优化流程**：
 
@@ -174,35 +201,49 @@ Metal GPU (Paged Attention 计算)
 git clone https://github.com/yourusername/ThunderLLAMA.git
 cd ThunderLLAMA
 
-# 2. 设置环境变量
-source thunder-env.sh
+# 2. 编译（启用 Metal GPU）
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON
+cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
-# 3. 编译（启用 Paged Attention）
-mkdir build && cd build
-cmake .. -DLLAMA_METAL=ON
-cmake --build . --config Release -j 8
+# 3. 验证
+./build/bin/llama-server --version
+```
 
-# 4. 验证
-./bin/llama-server --version
+### 配置文件（唯一真相源）
+
+ThunderLLAMA 使用 `thunderllama.conf` 作为所有配置的唯一真相源。
+**命令行参数和外部环境变量均被忽略**，所有配置必须写入此文件。
+
+```bash
+# 编辑配置
+vim thunderllama.conf
+
+# 关键配置项：
+MODEL_PATH="$HOME/models/your-model.gguf"
+CONTEXT_SIZE=4096
+SERVER_PORT=30000
+GPU_LAYERS=99
+FLASH_ATTENTION="on"
+THUNDER_LMCACHE=1
+LLAMA_PAGED_ATTENTION=1
+KV_CACHE_LEVEL="f16"
+CPU_THREADS=4           # TG 推理线程（M4 Pro 最优值）
+CPU_THREADS_BATCH=8     # PP 批处理线程
 ```
 
 ### 启动服务
 
 ```bash
-# 基础启动
-./bin/llama-server \
-  -m /path/to/model.gguf \
-  -c 8192 \              # Context size
-  -ngl 99 \              # GPU layers
-  --port 8080
+# 推荐方式：使用启动脚本
+./start-thunderllama.sh
 
-# 生产配置（启用 LMCache）
-LLAMA_PAGED_ATTENTION=1 ./bin/llama-server \
-  -m /path/to/model.gguf \
-  -c 32768 \
-  -ngl 99 \
-  --port 8080 \
-  --parallel 4
+# 或直接运行（自动读取 thunderllama.conf）
+./build/bin/llama-server
+
+# 停止 / 重启 / 状态
+./stop-thunderllama.sh
+./restart-thunderllama.sh
+./status-thunderllama.sh
 ```
 
 ### API 调用
@@ -251,11 +292,26 @@ curl http://localhost:8080/v1/chat/completions \
 ## 🔬 性能基准测试
 
 ### 测试环境
-- **硬件**：MacBook Pro M3 Max (48GB RAM)
-- **模型**：Qwen3-30B-A3B-128K (Q5_K_M)
-- **配置**：Context 8192, GPU Layers 99
+- **硬件**：MacBook Pro M4 Pro (48GB RAM, 273 GB/s 内存带宽)
+- **模型**：Qwen3-30B-A3B-128K (Q5_K_M / Q4_K_M)
+- **配置**：Context 4096, GPU Layers 99, Flash Attention ON, KV f16
 
-### 多场景基准测试
+### Metal 内核优化基准（10-run 稳定测量）
+
+| 优化项 | PP512 (tok/s) | TG128 (tok/s) | 提升 |
+|--------|:------------:|:------------:|:----:|
+| Baseline (上游 llama.cpp) | ~600 | ~59 | - |
+| + N_R0_Q5_K=8 (Metal 参数调优) | ~690 | ~63.5 | +7.6% TG |
+| + KV f16 (vs q4_0) | ~686 | ~59→66 | +5% TG |
+| + CPU threads=4/8 分离配置 | 718 | **66.36** | **+12.5% TG** |
+| + Q4_K_M 量化 | **767** | **75.90** | **+28.6% TG** |
+
+**关键发现**：
+- TG 是纯内存带宽瓶颈 — 模型缩小 14.6%，TG 快 14.4%（线性关系）
+- Metal 融合已接近天花板 — 元素操作融合 (nf=7)、并发 dispatch、Graph reuse 全部生效
+- Q5_K_M 带宽利用率 ~65%，软件可寻址差距仅 ~8%
+
+### LMCache 缓存基准（M3 Max）
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -267,7 +323,7 @@ curl http://localhost:8080/v1/chat/completions \
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 端到端集成测试
+### 端到端集成测试（M3 Max）
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -280,8 +336,9 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 **关键结论**：
-- ✅ L2 缓存命中：**10-60x** 加速
-- ✅ L3 磁盘恢复：**22-33x** 加速
+- ✅ Metal 内核优化：Q5_K **66 tok/s**，Q4_K **76 tok/s**
+- ✅ L2 缓存命中：**10-60x** PP 加速
+- ✅ L3 磁盘恢复：**22-33x** PP 加速
 - ✅ ContextPilot 优化：端到端延迟降低 **67%**
 
 ---
@@ -316,7 +373,15 @@ curl http://localhost:8080/v1/chat/completions \
 - [x] ContextPilot headers 解析
 - [x] ClawGate 端到端集成
 
-### 🚧 Phase 4（进行中）
+### ✅ Phase 4: Metal 内核优化（已完成）
+- [x] 配置文件唯一真相源（`thunderllama.conf`，代码级强制）
+- [x] N_R0_Q5_K Metal 参数调优（1 → 8，+2-3% TG）
+- [x] KV Cache 量化对比（f16 > q8_0 > q4_0，M4 Pro 实测）
+- [x] CPU 线程分离配置（TG=4 线程 / PP=8 线程）
+- [x] Metal GPU Profiling 分析（29 dispatches/layer, nf=7 fusion）
+- [x] Q4_K_M 量化验证（75.9 tok/s，+14.4%）
+
+### 🚧 Phase 5（进行中）
 - [ ] LMCache 使用 chunk hashes 优化查询
 - [ ] ClawGate 集成生产级 ContextPilot
 - [ ] 多 Agent 并发压力测试
@@ -324,7 +389,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### 🔮 未来计划
 - [ ] 分布式缓存共享
-- [ ] 更多 Metal 内核优化
+- [ ] 自定义 MoE Kernel（逼近理论天花板）
 - [ ] 量化感知缓存策略
 - [ ] WebUI 管理界面
 

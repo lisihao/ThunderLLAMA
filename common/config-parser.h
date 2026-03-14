@@ -229,6 +229,18 @@ inline void thunderllama_config_apply(common_params & params, const ThunderLLAMA
     }
 
     // === KV Cache ===
+    std::string kv_level = config.get("KV_CACHE_LEVEL");
+    if (!kv_level.empty()) {
+        ggml_type kv_type = GGML_TYPE_F16; // default
+        if (kv_level == "f16")       kv_type = GGML_TYPE_F16;
+        else if (kv_level == "q8_0") kv_type = GGML_TYPE_Q8_0;
+        else if (kv_level == "q4_0") kv_type = GGML_TYPE_Q4_0;
+        else if (kv_level == "q4_1") kv_type = GGML_TYPE_Q4_1;
+        else if (kv_level == "bf16") kv_type = GGML_TYPE_BF16;
+        params.cache_type_k = kv_type;
+        params.cache_type_v = kv_type;
+    }
+
     bool kv_unified = config.get_bool("KV_UNIFIED", false);
     if (kv_unified) {
         params.kv_unified = true;

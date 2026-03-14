@@ -20,7 +20,7 @@ bool llama_block_pool::init(
     this->block_size = block_sz;
     this->n_layer = hparams.n_layer;
     this->n_head = hparams.n_head();
-    this->head_dim = hparams.n_embd_head_k;
+    this->head_dim = hparams.n_embd_head_k();
 
     // Initialize block metadata
     blocks.resize(num_blocks);
