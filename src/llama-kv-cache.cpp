@@ -620,6 +620,15 @@ void llama_kv_cache::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, in
 llama_pos llama_kv_cache::seq_pos_min(llama_seq_id seq_id) const {
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
 
+    // Paged attention path - get position from block table
+    if (use_paged_attention && block_pool) {
+        auto it = block_pool->block_tables.find(seq_id);
+        if (it == block_pool->block_tables.end() || it->second.n_tokens == 0) {
+            return -1;  // Sequence not found or empty
+        }
+        return 0;  // Paged mode always starts from position 0
+    }
+
     const auto & cells = v_cells[seq_to_stream[seq_id]];
 
     return cells.seq_pos_min(seq_id);
@@ -627,6 +636,15 @@ llama_pos llama_kv_cache::seq_pos_min(llama_seq_id seq_id) const {
 
 llama_pos llama_kv_cache::seq_pos_max(llama_seq_id seq_id) const {
     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    // Paged attention path - get position from block table
+    if (use_paged_attention && block_pool) {
+        auto it = block_pool->block_tables.find(seq_id);
+        if (it == block_pool->block_tables.end() || it->second.n_tokens == 0) {
+            return -1;  // Sequence not found or empty
+        }
+        return (llama_pos)(it->second.n_tokens - 1);  // Max position is n_tokens - 1
+    }
 
     const auto & cells = v_cells[seq_to_stream[seq_id]];
 
