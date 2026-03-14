@@ -145,7 +145,7 @@ inline void thunderllama_config_apply(common_params & params, const ThunderLLAMA
     // === Model Configuration ===
     std::string model_path = config.get("MODEL_PATH");
     if (!model_path.empty()) {
-        params.model.name = model_path;
+        params.model.path = model_path;
     }
 
     int context_size = config.get_int("CONTEXT_SIZE", -1);
