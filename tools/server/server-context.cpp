@@ -590,6 +590,9 @@ private:
 
     bool sleeping = false;
 
+    // KV Cache strategy manager
+    kv_strategy_manager kv_strategy;
+
     void destroy() {
         llama_init.reset();
         ctx = nullptr;
@@ -619,6 +622,40 @@ private:
             }
         }
         sleeping = new_state;
+    }
+
+    // Rebuild context with new KV cache type
+    // Returns true on success, false if rebuild failed or slots are not idle
+    bool rebuild_context_for_kv_type(ggml_type new_type_k, ggml_type new_type_v) {
+        // 1. Check that all slots are idle
+        for (const auto & slot : slots) {
+            if (slot.state != SLOT_STATE_IDLE) {
+                SRV_WRN("slot %d is not idle (state=%d), cannot rebuild context\n",
+                        slot.id, (int)slot.state);
+                return false;
+            }
+        }
+
+        SRV_INF("rebuilding context for KV type change: K=%s V=%s\n",
+                ggml_type_name(new_type_k), ggml_type_name(new_type_v));
+
+        // 2. Update parameters
+        params_base.cache_type_k = new_type_k;
+        params_base.cache_type_v = new_type_v;
+
+        // 3. Destroy current context (releases GPU memory)
+        destroy();
+
+        // 4. Reload model with new KV cache type
+        if (!load_model(params_base)) {
+            SRV_ERR("%s", "failed to reload model after KV type change\n");
+            return false;
+        }
+
+        SRV_INF("context rebuild complete, KV cache type: K=%s V=%s\n",
+                ggml_type_name(new_type_k), ggml_type_name(new_type_v));
+
+        return true;
     }
 
     // load the model and initialize llama_context
@@ -832,6 +869,34 @@ private:
 
         model_aliases = params_base.model_alias;
         model_tags    = params_base.model_tags;
+
+        // Initialize KV cache strategy manager
+        if (!is_resume) {
+            kv_strategy.init();
+
+            // Record initial KV cache type from params
+            auto current_type = params_base.cache_type_k;
+            kv_quant_level initial_level = kv_strategy_manager::ggml_type_to_level(current_type);
+            kv_strategy.apply_decision({
+                initial_level,
+                false, // no rebuild on init
+                "initialized from startup params",
+                json::object()
+            });
+
+            // Check for environment variable override
+            const char * env_strategy = getenv("THUNDERLLAMA_KV_STRATEGY");
+            if (env_strategy) {
+                try {
+                    auto config = kv_strategy_config::from_json(json::parse(env_strategy));
+                    config.source = "env";
+                    kv_strategy.set_strategy(config);
+                    SRV_INF("KV strategy set from environment: %s\n", config.name.c_str());
+                } catch (const std::exception & e) {
+                    SRV_WRN("failed to parse THUNDERLLAMA_KV_STRATEGY: %s\n", e.what());
+                }
+            }
+        }
 
         if (!is_resume) {
             return init();
@@ -1936,6 +2001,84 @@ private:
                     res->id = task.id;
                     queue_results.send(std::move(res));
                 } break;
+            case SERVER_TASK_TYPE_KV_STRATEGY_GET:
+                {
+                    auto res = std::make_unique<server_task_result_kv_strategy>();
+                    res->id = task.id;
+                    res->config = kv_strategy.get_strategy();
+                    res->current_level = kv_strategy.get_current_level();
+                    res->metrics = kv_strategy.get_metrics();
+                    res->history = kv_strategy.get_history(10);
+                    res->available_strategies = kv_strategy.registry().list_strategies();
+                    queue_results.send(std::move(res));
+                } break;
+            case SERVER_TASK_TYPE_KV_STRATEGY_SET:
+                {
+                    auto res = std::make_unique<server_task_result_kv_strategy>();
+                    res->id = task.id;
+
+                    try {
+                        // Parse and validate strategy config
+                        auto config = kv_strategy_config::from_json(task.kv_strategy_data);
+                        config.source = "api";
+
+                        // Verify strategy exists
+                        if (!kv_strategy.registry().has_strategy(config.name)) {
+                            send_error(task, "unknown strategy: " + config.name, ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+
+                        // Set strategy
+                        kv_strategy.set_strategy(config);
+
+                        // Get current metrics
+                        kv_strategy_metrics current_metrics;
+                        current_metrics.n_ctx_total = n_ctx;
+                        current_metrics.n_ctx_used = 0;
+                        for (const auto & slot : slots) {
+                            if (slot.is_processing()) {
+                                current_metrics.n_ctx_used += slot.prompt.n_tokens();
+                            }
+                        }
+                        current_metrics.n_slots_total = (int32_t)slots.size();
+                        current_metrics.n_slots_active = 0;
+                        for (const auto & slot : slots) {
+                            if (slot.is_processing()) {
+                                current_metrics.n_slots_active++;
+                            }
+                        }
+                        current_metrics.timestamp_us = ggml_time_us();
+                        kv_strategy.update_metrics(current_metrics);
+
+                        // Evaluate strategy
+                        auto decision = kv_strategy.evaluate(current_metrics);
+
+                        // Execute rebuild if needed
+                        bool rebuild_success = true;
+                        if (decision.requires_rebuild) {
+                            auto new_type = kv_strategy_manager::level_to_ggml_type(decision.level);
+                            rebuild_success = rebuild_context_for_kv_type(new_type, new_type);
+                        }
+
+                        // Apply decision if rebuild succeeded
+                        if (rebuild_success) {
+                            kv_strategy.apply_decision(decision);
+                        }
+
+                        // Fill result
+                        res->config = kv_strategy.get_strategy();
+                        res->current_level = kv_strategy.get_current_level();
+                        res->metrics = current_metrics;
+                        res->rebuild_performed = decision.requires_rebuild;
+                        res->rebuild_success = rebuild_success;
+                        res->decision = decision;
+
+                        queue_results.send(std::move(res));
+
+                    } catch (const std::exception & e) {
+                        send_error(task, "strategy set failed: " + std::string(e.what()), ERROR_TYPE_SERVER);
+                    }
+                } break;
         }
     }
 
@@ -1964,6 +2107,55 @@ private:
             server_task task(SERVER_TASK_TYPE_NEXT_RESPONSE);
             task.id = queue_tasks.get_new_id();
             queue_tasks.post(std::move(task));
+        }
+
+        // Periodic KV cache strategy evaluation (every 10 seconds)
+        {
+            static int64_t last_strategy_eval_us = 0;
+            int64_t now_us = ggml_time_us();
+
+            if (now_us - last_strategy_eval_us > 10 * 1000000) { // 10 seconds
+                last_strategy_eval_us = now_us;
+
+                // Collect current metrics
+                kv_strategy_metrics metrics;
+                metrics.n_ctx_total = n_ctx;
+                metrics.n_ctx_used = 0;
+                for (const auto & slot : slots) {
+                    if (slot.is_processing()) {
+                        metrics.n_ctx_used += slot.prompt.n_tokens();
+                    }
+                }
+                metrics.n_slots_total = (int32_t)slots.size();
+                metrics.n_slots_active = 0;
+                for (const auto & slot : slots) {
+                    if (slot.is_processing()) {
+                        metrics.n_slots_active++;
+                    }
+                }
+                metrics.timestamp_us = now_us;
+
+                // Update metrics
+                kv_strategy.update_metrics(metrics);
+
+                // Only auto-evaluate for default/env strategies (not ClawGate API-set strategies)
+                auto config = kv_strategy.get_strategy();
+                if (config.source == "default" || config.source == "env") {
+                    auto decision = kv_strategy.evaluate(metrics);
+
+                    if (decision.requires_rebuild) {
+                        SRV_INF("periodic strategy evaluation: rebuild to %s\n",
+                                kv_strategy_manager::level_to_string(decision.level).c_str());
+
+                        auto new_type = kv_strategy_manager::level_to_ggml_type(decision.level);
+                        if (rebuild_context_for_kv_type(new_type, new_type)) {
+                            kv_strategy.apply_decision(decision);
+                        } else {
+                            SRV_WRN("%s", "periodic strategy evaluation: rebuild failed\n");
+                        }
+                    }
+                }
+            }
         }
 
         // apply context-shift if needed
@@ -4138,6 +4330,201 @@ void server_routes::init_routes() {
         GGML_ASSERT(dynamic_cast<server_task_result_apply_lora*>(result.get()) != nullptr);
         res->ok(result->to_json());
         return res;
+    };
+
+    // KV Cache Strategy Management Routes (ThunderLLAMA)
+
+    this->get_kv_strategy = [this](const server_http_req & req) {
+        auto res = create_response();
+        auto & rd = res->rd;
+
+        {
+            server_task task(SERVER_TASK_TYPE_KV_STRATEGY_GET);
+            task.id = rd.get_new_id();
+            rd.post_task(std::move(task));
+        }
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+
+        GGML_ASSERT(dynamic_cast<server_task_result_kv_strategy*>(result.get()) != nullptr);
+        res->ok(result->to_json());
+        return res;
+    };
+
+    this->post_kv_strategy = [this](const server_http_req & req) {
+        auto res = create_response();
+
+        try {
+            const json body = json::parse(req.body);
+
+            // Validate required fields
+            if (!body.contains("name")) {
+                res->error(format_error_response("\"name\" field is required", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+
+            if (!body.at("name").is_string()) {
+                res->error(format_error_response("\"name\" must be a string", ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+
+            auto & rd = res->rd;
+            {
+                server_task task(SERVER_TASK_TYPE_KV_STRATEGY_SET);
+                task.id = rd.get_new_id();
+                task.kv_strategy_data = body;
+                rd.post_task(std::move(task));
+            }
+
+            auto result = rd.next(req.should_stop);
+            if (!result) {
+                GGML_ASSERT(req.should_stop());
+                return res;
+            }
+
+            if (result->is_error()) {
+                res->error(result->to_json());
+                return res;
+            }
+
+            GGML_ASSERT(dynamic_cast<server_task_result_kv_strategy*>(result.get()) != nullptr);
+            res->ok(result->to_json());
+            return res;
+
+        } catch (const std::exception & e) {
+            res->error(format_error_response(std::string("JSON parse error: ") + e.what(), ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+    };
+
+    this->get_kv_strategy_evaluate = [this](const server_http_req & req) {
+        auto res = create_response();
+
+        // Use GET task to retrieve current state, then evaluate
+        auto & rd = res->rd;
+        {
+            server_task task(SERVER_TASK_TYPE_KV_STRATEGY_GET);
+            task.id = rd.get_new_id();
+            rd.post_task(std::move(task));
+        }
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+
+        // Return the last decision from history as the "dry-run" evaluation
+        auto res_task = dynamic_cast<server_task_result_kv_strategy*>(result.get());
+        GGML_ASSERT(res_task != nullptr);
+
+        json history = res_task->history;
+        json eval_result = {
+            {"current_level", res_task->current_level},
+            {"metrics", res_task->metrics.to_json()},
+            {"note", "Dry-run: showing last decision from history. POST to apply changes."}
+        };
+
+        if (history.is_array() && history.size() > 0) {
+            eval_result["decision"] = history[history.size() - 1]["decision"];
+        }
+
+        res->ok(eval_result);
+        return res;
+    };
+
+    this->get_kv_strategy_available = [this](const server_http_req & req) {
+        auto res = create_response();
+
+        // Use GET task to retrieve available strategies
+        auto & rd = res->rd;
+        {
+            server_task task(SERVER_TASK_TYPE_KV_STRATEGY_GET);
+            task.id = rd.get_new_id();
+            rd.post_task(std::move(task));
+        }
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+
+        auto res_task = dynamic_cast<server_task_result_kv_strategy*>(result.get());
+        GGML_ASSERT(res_task != nullptr);
+
+        try {
+            auto strategies = res_task->available_strategies;
+
+            json result = json::array();
+            for (const auto & name : strategies) {
+                json strategy_info = {
+                    {"name", name}
+                };
+
+                // Add parameter schema for each strategy
+                if (name == "fixed") {
+                    strategy_info["params_schema"] = {
+                        {"level", {
+                            {"type", "string"},
+                            {"enum", {"f16", "q8_0", "q4_0"}},
+                            {"description", "Target quantization level"}
+                        }}
+                    };
+                } else if (name == "threshold") {
+                    strategy_info["params_schema"] = {
+                        {"thresholds", {
+                            {"type", "array"},
+                            {"description", "Array of {ctx_utilization: number, level: string} objects"}
+                        }},
+                        {"hysteresis", {
+                            {"type", "number"},
+                            {"default", 0.05},
+                            {"description", "Hysteresis band to prevent oscillation"}
+                        }}
+                    };
+                } else if (name == "adaptive") {
+                    strategy_info["params_schema"] = {
+                        {"ctx_weight", {"type", "number", "default", 0.4}},
+                        {"memory_weight", {"type", "number", "default", 0.3}},
+                        {"load_weight", {"type", "number", "default", 0.2}},
+                        {"prompt_weight", {"type", "number", "default", 0.1}},
+                        {"memory_emergency_threshold", {"type", "number", "default", 0.85}},
+                        {"high_load_threshold", {"type", "number", "default", 0.7}},
+                        {"medium_load_threshold", {"type", "number", "default", 0.4}},
+                        {"hysteresis", {"type", "number", "default", 0.05}}
+                    };
+                }
+
+                result.push_back(strategy_info);
+            }
+
+            res->ok(result);
+            return res;
+
+        } catch (const std::exception & e) {
+            res->error(format_error_response(std::string("Error listing strategies: ") + e.what(), ERROR_TYPE_SERVER));
+            return res;
+        }
     };
 }
 

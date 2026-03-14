@@ -10,6 +10,7 @@
 
 // TODO: prevent including the whole server-common.h as we only use server_tokens
 #include "server-common.h"
+#include "server-kv-strategy.h"
 
 using json = nlohmann::ordered_json;
 
@@ -26,6 +27,8 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_ERASE,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
+    SERVER_TASK_TYPE_KV_STRATEGY_GET,
+    SERVER_TASK_TYPE_KV_STRATEGY_SET,
 };
 
 // TODO: change this to more generic "response_format" to replace the "format_response_*" in server-common
@@ -164,6 +167,9 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
+
+    // used by SERVER_TASK_TYPE_KV_STRATEGY_SET
+    json kv_strategy_data;
 
     // ContextPilot headers for deduplication
     std::string context_signature;        // X-Context-Signature
@@ -554,6 +560,30 @@ struct server_task_result_get_lora : server_task_result {
 };
 
 struct server_task_result_apply_lora : server_task_result {
+    virtual json to_json() override;
+};
+
+struct server_task_result_kv_strategy : server_task_result {
+    // Current strategy configuration
+    kv_strategy_config config;
+
+    // Current quantization level
+    kv_quant_level current_level;
+
+    // Latest metrics
+    kv_strategy_metrics metrics;
+
+    // Decision history (last 10 decisions)
+    json history;
+
+    // Available strategy names
+    std::vector<std::string> available_strategies;
+
+    // For SET operation
+    bool rebuild_performed = false;
+    bool rebuild_success = false;
+    kv_strategy_decision decision;
+
     virtual json to_json() override;
 };
 

@@ -4,6 +4,7 @@
 
 #include "arg.h"
 #include "common.h"
+#include "config-parser.h"  // ThunderLLAMA config file parser
 #include "llama.h"
 #include "log.h"
 
@@ -70,9 +71,42 @@ int main(int argc, char ** argv) {
     // own arguments required by this example
     common_params params;
 
-    if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SERVER)) {
+    // === ThunderLLAMA Configuration File Loading ===
+    // Configuration is ONLY read from thunderllama.conf
+    // Command line arguments and environment variables are IGNORED (as per user requirement)
+
+    // Find config file path
+    std::string config_path = THUNDERLLAMA_DEFAULT_CONFIG;
+
+    // Check if config file exists in current directory
+    std::ifstream config_check(config_path);
+    if (!config_check.good()) {
+        // Try in the directory where the executable is located
+        std::string exe_path = argv[0];
+        size_t last_sep = exe_path.find_last_of("/\\");
+        if (last_sep != std::string::npos) {
+            config_path = exe_path.substr(0, last_sep + 1) + THUNDERLLAMA_DEFAULT_CONFIG;
+        }
+    }
+    config_check.close();
+
+    // Load config file and apply to params (also sets environment variables)
+    if (!thunderllama_config_load_and_apply(params, config_path)) {
+        LOG_ERR("%s: failed to load config file: %s\n", __func__, config_path.c_str());
+        LOG_ERR("%s: ThunderLLAMA requires thunderllama.conf to run\n", __func__);
+        LOG_ERR("%s: please create thunderllama.conf or run ./start-thunderllama.sh\n", __func__);
         return 1;
     }
+
+    // === Command line arguments are DISABLED ===
+    // ThunderLLAMA uses ONLY thunderllama.conf for configuration
+    // This ensures configuration persistence across sessions
+    // (Environment variables set by config-parser are still used internally)
+
+    // Original code (now disabled):
+    // if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_SERVER)) {
+    //     return 1;
+    // }
 
     // validate batch size for embeddings
     // embeddings require all tokens to be processed in a single ubatch
@@ -196,6 +230,11 @@ int main(int argc, char ** argv) {
     // LoRA adapters hotswap
     ctx_http.get ("/lora-adapters",       ex_wrapper(routes.get_lora_adapters));
     ctx_http.post("/lora-adapters",       ex_wrapper(routes.post_lora_adapters));
+    // KV Cache Strategy Management (ThunderLLAMA)
+    ctx_http.get ("/thunder/kv-strategy",           ex_wrapper(routes.get_kv_strategy));
+    ctx_http.post("/thunder/kv-strategy",           ex_wrapper(routes.post_kv_strategy));
+    ctx_http.get ("/thunder/kv-strategy/evaluate",  ex_wrapper(routes.get_kv_strategy_evaluate));
+    ctx_http.get ("/thunder/kv-strategy/available", ex_wrapper(routes.get_kv_strategy_available));
     // Save & load slots
     ctx_http.get ("/slots",               ex_wrapper(routes.get_slots));
     ctx_http.post("/slots/:id_slot",      ex_wrapper(routes.post_slots));

@@ -1837,6 +1837,42 @@ json server_task_result_apply_lora::to_json() {
 }
 
 //
+// server_task_result_kv_strategy
+//
+json server_task_result_kv_strategy::to_json() {
+    json res = json::object();
+
+    // Current strategy configuration
+    res["strategy"] = config.to_json();
+
+    // Current quantization level
+    res["current_level"] = kv_strategy_manager::level_to_string(current_level);
+
+    // Latest metrics
+    res["metrics"] = metrics.to_json();
+
+    // Available strategies (for GET operation)
+    if (!available_strategies.empty()) {
+        res["available_strategies"] = available_strategies;
+    }
+
+    // Decision history (for GET operation)
+    if (!history.is_null()) {
+        res["history"] = history;
+    }
+
+    // Rebuild results (for SET operation)
+    // Check if this is a SET operation by checking if decision reason is not empty
+    if (!decision.reason.empty()) {
+        res["rebuild_performed"] = rebuild_performed;
+        res["rebuild_success"] = rebuild_success;
+        res["decision"] = decision.to_json();
+    }
+
+    return res;
+}
+
+//
 // server_prompt_cache
 //
 size_t server_prompt_cache::size() const {

@@ -12,6 +12,44 @@
 
 ---
 
+## ⚙️ 统一配置系统
+
+**ThunderLLAMA 现在使用配置文件作为唯一真相源**，不再接受命令行参数或外部环境变量。
+
+### 快速启动
+
+```bash
+cd /Users/lisihao/ThunderLLAMA
+
+# 方式 1: 使用启动脚本（推荐）
+./start-thunderllama.sh
+
+# 方式 2: 直接运行（自动读取配置文件）
+./build/bin/llama-server
+```
+
+### 核心特性
+
+- ✅ **配置持久化** - 所有配置保存在 `thunderllama.conf`，不会因会话丢失而遗忘
+- ✅ **一次配置，永久有效** - 无需每次启动时手动输入大量参数
+- ✅ **代码级强制** - C++ 代码只从配置文件读取，命令行参数被禁用
+- ✅ **版本控制** - 配置文件可通过 git 管理和回滚
+
+### 配置文件位置
+
+**`/Users/lisihao/ThunderLLAMA/thunderllama.conf`**
+
+包含所有优化参数：
+- 模型路径和上下文大小
+- ThunderLLAMA 优化开关（THUNDER_LMCACHE, LLAMA_PAGED_ATTENTION）
+- KV Cache 量化策略（q4_0 / q8_0 / f16）
+- 服务器配置（端口、GPU 层数、并行槽位）
+- 性能参数（Flash Attention、批处理、缓存策略）
+
+**详细文档**: [配置系统文档](docs/configuration-system.md) | [快速参考](README-CONFIGURATION.md)
+
+---
+
 ## 🚀 核心性能
 
 | 场景 | 性能提升 | 真实数据（Qwen3-30B, M3 Max） |
