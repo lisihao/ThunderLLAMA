@@ -683,7 +683,7 @@ bool ThunderChunkStorage::blit_from_l1(const thunder_kv_chunk_key & key,
 
     if (success) {
         // L1 hit! Update stats
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         total_hits_++;
         access_freq_[key_hash]++;
         total_accesses_++;

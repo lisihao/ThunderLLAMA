@@ -79,28 +79,9 @@ int main(int argc, char ** argv) {
     // Configuration is ONLY read from thunderllama.conf
     // Command line arguments and environment variables are IGNORED (as per user requirement)
 
-    // Find config file path
-    std::string config_path = THUNDERLLAMA_DEFAULT_CONFIG;
-
-    // Check if config file exists in current directory
-    std::ifstream config_check(config_path);
-    if (!config_check.good()) {
-        // Try in the directory where the executable is located
-        std::string exe_path = argv[0];
-        size_t last_sep = exe_path.find_last_of("/\\");
-        if (last_sep != std::string::npos) {
-            config_path = exe_path.substr(0, last_sep + 1) + THUNDERLLAMA_DEFAULT_CONFIG;
-        }
-    }
-    config_check.close();
-
     // Load config file and apply to params (also sets environment variables)
-    if (!thunderllama_config_load_and_apply(params, config_path)) {
-        LOG_ERR("%s: failed to load config file: %s\n", __func__, config_path.c_str());
-        LOG_ERR("%s: ThunderLLAMA requires thunderllama.conf to run\n", __func__);
-        LOG_ERR("%s: please create thunderllama.conf or run ./start-thunderllama.sh\n", __func__);
-        return 1;
-    }
+    // thunderllama_config_load_and_apply auto-discovers config file location
+    thunderllama::thunderllama_config_load_and_apply(params);
 
     // === Command line arguments are DISABLED ===
     // ThunderLLAMA uses ONLY thunderllama.conf for configuration
