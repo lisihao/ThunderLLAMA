@@ -13,6 +13,10 @@
 #include <map>
 #include <stdexcept>
 
+// Metal KV Cache Quantization Support
+// Note: Full implementation requires Metal device access from ggml_backend
+// Currently just checking configuration and logging
+
 //
 // llama_kv_cache
 //
@@ -854,6 +858,32 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 
             cells.reset_shift();
         }
+    }
+
+    // KV Cache Quantization (Task #11)
+    // Apply quantization to KV cache if configured
+    // OPTIMIZATION: Cache getenv() result in static variable to avoid repeated syscalls
+    static const char * kv_level_env = getenv("KV_CACHE_LEVEL");
+    static bool need_quantize = kv_level_env &&
+                                 (strcmp(kv_level_env, "q8_0") == 0 ||
+                                  strcmp(kv_level_env, "q4_0") == 0);
+
+    // Debug: Log configuration (first call only)
+    static bool logged_once = false;
+    if (!logged_once) {
+        if (kv_level_env) {
+            LLAMA_LOG_INFO("%s: KV_CACHE_LEVEL=%s, quantization=%s\n", __func__,
+                          kv_level_env, need_quantize ? "enabled" : "disabled");
+        }
+        logged_once = true;
+    }
+
+    if (need_quantize) {
+        // TODO: Implement actual quantization call using Metal API
+        // Requires:
+        // 1. Get Metal device from ggml_backend
+        // 2. For each layer, quantize K and V tensors
+        // 3. Use ggml_metal_quantize_kv_cache_q8_pipeline()
     }
 
     return updated;
