@@ -11,6 +11,8 @@
 
 #import <Metal/Metal.h>
 
+#include <mach/mach_time.h>
+
 #undef MIN
 #undef MAX
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -736,4 +738,855 @@ bool ggml_metal_supports_family(ggml_metal_t ctx, int family) {
 
 void ggml_metal_capture_next_compute(ggml_metal_t ctx) {
     ctx->capture_compute = 1;
+}
+
+// ============================================================================
+// ThunderLLAMA KV Cache Quantization (GPU-side, 对标 MLX mx.quantize)
+// ============================================================================
+
+// 测试专用：从 CPU 内存创建 Metal buffers
+void ggml_metal_quantize_kv_cache_q8_cpu(
+        ggml_metal_device_t dev,
+        const ggml_fp16_t * src_cpu,   // CPU FP16 input
+        int8_t            * dst_cpu,   // CPU INT8 output
+        ggml_fp16_t       * scales_cpu,// CPU FP16 scales
+        int                 ne00,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int n_groups = (ne00 + group_size - 1) / group_size;
+
+    // Create Metal buffers
+    id<MTLBuffer> src_buf = [device newBufferWithLength:ne00 * sizeof(ggml_fp16_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:ne00 * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+
+    // Copy input to GPU
+    memcpy([src_buf contents], src_cpu, ne00 * sizeof(ggml_fp16_t));
+
+    // Execute GPU quantization kernel
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_quantize_kv_cache_q8 function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create quantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:src_buf    offset:0 atIndex:0];
+    [encoder setBuffer:dst_buf    offset:0 atIndex:1];
+    [encoder setBuffer:scales_buf offset:0 atIndex:2];
+    [encoder setBytes:&ne00       length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+    int n_threadgroups = n_groups;
+    MTLSize threadgroups = MTLSizeMake(n_threadgroups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    // Copy output back to CPU
+    memcpy(dst_cpu, [dst_buf contents], ne00 * sizeof(int8_t));
+    memcpy(scales_cpu, [scales_buf contents], n_groups * sizeof(ggml_fp16_t));
+}
+
+void ggml_metal_dequantize_kv_cache_q8_cpu(
+        ggml_metal_device_t dev,
+        const int8_t      * src_cpu,
+        const ggml_fp16_t * scales_cpu,
+        ggml_fp16_t       * dst_cpu,
+        int                 ne00,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int n_groups = (ne00 + group_size - 1) / group_size;
+
+    // Create Metal buffers
+    id<MTLBuffer> src_buf = [device newBufferWithLength:ne00 * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:ne00 * sizeof(ggml_fp16_t)
+                                                 options:MTLResourceStorageModeShared];
+
+    // Copy input to GPU
+    memcpy([src_buf contents], src_cpu, ne00 * sizeof(int8_t));
+    memcpy([scales_buf contents], scales_cpu, n_groups * sizeof(ggml_fp16_t));
+
+    // Execute GPU dequantization kernel
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_dequantize_kv_cache_q8"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_dequantize_kv_cache_q8 function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create dequantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:src_buf    offset:0 atIndex:0];
+    [encoder setBuffer:scales_buf offset:0 atIndex:1];
+    [encoder setBuffer:dst_buf    offset:0 atIndex:2];
+    [encoder setBytes:&ne00       length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+    // Changed to threadgroup-level dispatch (like quantization kernel)
+    // Each threadgroup processes one quantization group
+    int threads_per_threadgroup = 32;  // One simdgroup
+
+    MTLSize threadgroups = MTLSizeMake(n_groups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(threads_per_threadgroup, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    // Copy output back to CPU
+    memcpy(dst_cpu, [dst_buf contents], ne00 * sizeof(ggml_fp16_t));
+}
+
+// ============================================================================
+
+void ggml_metal_quantize_kv_cache_q8(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales (1 per group)
+        int          ne00,     // Total elements
+        int          group_size) {
+
+    // Get Metal objects
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    // Create command buffer
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    // Get quantization kernel
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_quantize_kv_cache_q8 function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create quantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    // Set pipeline and buffers
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(id<MTLBuffer>)src    offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)dst    offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)scales offset:0 atIndex:2];
+    [encoder setBytes:&ne00       length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+    // Dispatch
+    int n_groups = (ne00 + group_size - 1) / group_size;
+    MTLSize threadgroups = MTLSizeMake(n_groups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);  // 1 simdgroup
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+}
+
+void ggml_metal_dequantize_kv_cache_q8(
+        ggml_metal_device_t dev,
+        const void * src,      // INT8 input
+        const void * scales,   // FP16 scales
+        void       * dst,      // FP16 output
+        int          ne00,
+        int          group_size) {
+
+    // Get Metal objects
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    // Create command buffer
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    // Get dequantization kernel
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_dequantize_kv_cache_q8"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_dequantize_kv_cache_q8 function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create dequantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    // Set pipeline and buffers
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(id<MTLBuffer>)src    offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)scales offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)dst    offset:0 atIndex:2];
+    [encoder setBytes:&ne00       length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+    // Dispatch
+    int n_threads = ne00;
+    int threads_per_threadgroup = 256;
+    int n_threadgroups = (n_threads + threads_per_threadgroup - 1) / threads_per_threadgroup;
+
+    MTLSize threadgroups = MTLSizeMake(n_threadgroups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(threads_per_threadgroup, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+}
+
+// ============================================================================
+// High-Performance Version (v2) with Threadgroup Memory
+// ============================================================================
+
+void ggml_metal_quantize_kv_cache_q8_v2(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales (1 per group)
+        int          ne00,     // Total elements
+        int          group_size) {
+
+    // Get Metal objects
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    // Create command buffer
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    // Get v2 quantization kernel
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8_v2"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_quantize_kv_cache_q8_v2 function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create v2 quantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    // Set pipeline and buffers
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(id<MTLBuffer>)src    offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)dst    offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)scales offset:0 atIndex:2];
+    [encoder setBytes:&ne00       length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+    // Dispatch with 128 threads per threadgroup
+    // Each threadgroup processes 1 quantization group (64 elements)
+    int n_groups = (ne00 + group_size - 1) / group_size;
+
+    MTLSize threadgroups = MTLSizeMake(n_groups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(128, 1, 1);  // 4 simdgroups
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+}
+
+// Test wrapper for v2 (CPU-side)
+void ggml_metal_quantize_kv_cache_q8_v2_cpu(
+        ggml_metal_device_t dev,
+        const ggml_fp16_t * src_cpu,
+        int8_t            * dst_cpu,
+        ggml_fp16_t       * scales_cpu,
+        int                 ne00,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int n_groups = (ne00 + group_size - 1) / group_size;
+
+    // Create Metal buffers
+    id<MTLBuffer> src_buf = [device newBufferWithLength:ne00 * sizeof(ggml_fp16_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:ne00 * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+
+    // Copy input to GPU
+    memcpy([src_buf contents], src_cpu, ne00 * sizeof(ggml_fp16_t));
+
+    // Execute GPU quantization kernel (v2)
+    ggml_metal_quantize_kv_cache_q8_v2(dev, src_buf, dst_buf, scales_buf, ne00, group_size);
+
+    // Copy output back to CPU
+    memcpy(dst_cpu, [dst_buf contents], ne00 * sizeof(int8_t));
+    memcpy(scales_cpu, [scales_buf contents], n_groups * sizeof(ggml_fp16_t));
+}
+
+// ============================================================================
+// Batch Quantization (方案 B: Reduce Kernel Launch Overhead)
+// ============================================================================
+
+void ggml_metal_quantize_kv_cache_q8_batch(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input (all layers concatenated)
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales
+        int          total_elements,
+        int          group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8_batch"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get batch quantization kernel\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create batch pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(id<MTLBuffer>)src    offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)dst    offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)scales offset:0 atIndex:2];
+    [encoder setBytes:&total_elements length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size     length:sizeof(int) atIndex:4];
+
+    int n_groups = (total_elements + group_size - 1) / group_size;
+    MTLSize threadgroups = MTLSizeMake(n_groups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+}
+
+void ggml_metal_dequantize_kv_cache_q8_batch(
+        ggml_metal_device_t dev,
+        const void * src,
+        const void * scales,
+        void       * dst,
+        int          total_elements,
+        int          group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_dequantize_kv_cache_q8_batch"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get batch dequantization kernel\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create batch deq pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:(id<MTLBuffer>)src    offset:0 atIndex:0];
+    [encoder setBuffer:(id<MTLBuffer>)scales offset:0 atIndex:1];
+    [encoder setBuffer:(id<MTLBuffer>)dst    offset:0 atIndex:2];
+    [encoder setBytes:&total_elements length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size     length:sizeof(int) atIndex:4];
+
+    int n_groups = (total_elements + group_size - 1) / group_size;
+    MTLSize threadgroups = MTLSizeMake(n_groups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+}
+
+// ============================================================================
+// Offline Quantization (方案 C: Quantize Once, Use Many Times)
+// ============================================================================
+
+void ggml_metal_kv_cache_quantize_offline(
+        ggml_metal_device_t dev,
+        void       * kv_cache,     // KV cache buffer
+        int          n_layers,
+        int          hidden_dim,
+        int          seq_len,
+        int          group_size) {
+
+    // Calculate total elements
+    int elements_per_layer = hidden_dim * seq_len;
+    int total_elements = n_layers * elements_per_layer * 2;  // K + V
+
+    fprintf(stderr, "Offline KV Cache Quantization:\n");
+    fprintf(stderr, "  Layers: %d\n", n_layers);
+    fprintf(stderr, "  Hidden Dim: %d\n", hidden_dim);
+    fprintf(stderr, "  Seq Len: %d\n", seq_len);
+    fprintf(stderr, "  Total Elements: %d (%.2f MB FP16)\n",
+            total_elements, total_elements * 2.0 / 1024 / 1024);
+
+    // Use batch quantization
+    int n_groups = (total_elements + group_size - 1) / group_size;
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:total_elements * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+
+    // Timing using mach_absolute_time (Objective-C compatible)
+    uint64_t start = mach_absolute_time();
+
+    ggml_metal_quantize_kv_cache_q8_batch(dev, kv_cache, dst_buf, scales_buf,
+                                          total_elements, group_size);
+
+    uint64_t end = mach_absolute_time();
+
+    // Convert to milliseconds
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    uint64_t elapsed_ns = (end - start) * timebase.numer / timebase.denom;
+    double elapsed_ms = elapsed_ns / 1e6;
+
+    double data_mb = total_elements * 2.0 / 1024 / 1024;
+    double throughput_gb_s = data_mb / elapsed_ms;
+
+    fprintf(stderr, "Offline Quantization Complete:\n");
+    fprintf(stderr, "  Time: %.3f ms\n", elapsed_ms);
+    fprintf(stderr, "  Throughput: %.2f GB/s\n", throughput_gb_s);
+    fprintf(stderr, "  Memory Reduction: %.1fx (%.2f MB → %.2f MB)\n",
+            (float)(total_elements * 2) / (total_elements + n_groups * 2),
+            data_mb,
+            (total_elements + n_groups * 2.0) / 1024 / 1024);
+}
+
+// Batch quantization wrapper (CPU interface for testing)
+void ggml_metal_quantize_kv_cache_q8_batch_cpu(
+        ggml_metal_device_t dev,
+        const ggml_fp16_t * src_cpu,
+        int8_t            * dst_cpu,
+        ggml_fp16_t       * scales_cpu,
+        int                 total_elements,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int n_groups = (total_elements + group_size - 1) / group_size;
+
+    // Create Metal buffers
+    id<MTLBuffer> src_buf = [device newBufferWithLength:total_elements * sizeof(ggml_fp16_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:total_elements * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+
+    // Copy input to GPU
+    memcpy([src_buf contents], src_cpu, total_elements * sizeof(ggml_fp16_t));
+
+    // Execute GPU batch quantization kernel
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8_batch"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_quantize_kv_cache_q8_batch function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create batch quantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:src_buf    offset:0 atIndex:0];
+    [encoder setBuffer:dst_buf    offset:0 atIndex:1];
+    [encoder setBuffer:scales_buf offset:0 atIndex:2];
+    [encoder setBytes:&total_elements length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size     length:sizeof(int) atIndex:4];
+
+    int n_threadgroups = n_groups;
+    MTLSize threadgroups = MTLSizeMake(n_threadgroups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    // Copy output back to CPU
+    memcpy(dst_cpu, [dst_buf contents], total_elements * sizeof(int8_t));
+    memcpy(scales_cpu, [scales_buf contents], n_groups * sizeof(ggml_fp16_t));
+}
+
+// Batch dequantization wrapper (CPU interface for testing)
+void ggml_metal_dequantize_kv_cache_q8_batch_cpu(
+        ggml_metal_device_t dev,
+        const int8_t      * src_cpu,
+        const ggml_fp16_t * scales_cpu,
+        ggml_fp16_t       * dst_cpu,
+        int                 total_elements,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int n_groups = (total_elements + group_size - 1) / group_size;
+
+    // Create Metal buffers
+    id<MTLBuffer> src_buf = [device newBufferWithLength:total_elements * sizeof(int8_t)
+                                                 options:MTLResourceStorageModeShared];
+    id<MTLBuffer> scales_buf = [device newBufferWithLength:n_groups * sizeof(ggml_fp16_t)
+                                                    options:MTLResourceStorageModeShared];
+    id<MTLBuffer> dst_buf = [device newBufferWithLength:total_elements * sizeof(ggml_fp16_t)
+                                                 options:MTLResourceStorageModeShared];
+
+    // Copy input to GPU
+    memcpy([src_buf contents], src_cpu, total_elements * sizeof(int8_t));
+    memcpy([scales_buf contents], scales_cpu, n_groups * sizeof(ggml_fp16_t));
+
+    // Execute GPU batch dequantization kernel
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_dequantize_kv_cache_q8_batch"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_dequantize_kv_cache_q8_batch function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create batch dequantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    [encoder setComputePipelineState:pipeline];
+    [encoder setBuffer:src_buf    offset:0 atIndex:0];
+    [encoder setBuffer:scales_buf offset:0 atIndex:1];
+    [encoder setBuffer:dst_buf    offset:0 atIndex:2];
+    [encoder setBytes:&total_elements length:sizeof(int) atIndex:3];
+    [encoder setBytes:&group_size     length:sizeof(int) atIndex:4];
+
+    int n_threadgroups = n_groups;
+    MTLSize threadgroups = MTLSizeMake(n_threadgroups, 1, 1);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+    [encoder endEncoding];
+
+    [command_buffer commit];
+    [command_buffer waitUntilCompleted];
+
+    // Copy output back to CPU
+    memcpy(dst_cpu, [dst_buf contents], total_elements * sizeof(ggml_fp16_t));
+}
+
+// Offline quantization wrapper (CPU interface for testing)
+void ggml_metal_kv_cache_quantize_offline_cpu(
+        ggml_metal_device_t dev,
+        ggml_fp16_t       * kv_cache,
+        int                 n_layers,
+        int                 hidden_dim,
+        int                 seq_len,
+        int                 group_size) {
+
+    int elements_per_layer = hidden_dim * seq_len;
+    int total_elements = n_layers * elements_per_layer * 2;
+    int n_groups = (total_elements + group_size - 1) / group_size;
+
+    fprintf(stderr, "Offline KV Cache Quantization:\n");
+    fprintf(stderr, "  Layers: %d\n", n_layers);
+    fprintf(stderr, "  Hidden Dim: %d\n", hidden_dim);
+    fprintf(stderr, "  Seq Len: %d\n", seq_len);
+    fprintf(stderr, "  Total Elements: %d (%.2f MB FP16)\n",
+            total_elements, total_elements * 2.0 / 1024 / 1024);
+
+    // Use batch quantization
+    int8_t * dst_buf_cpu = (int8_t *)malloc(total_elements * sizeof(int8_t));
+    ggml_fp16_t * scales_cpu = (ggml_fp16_t *)malloc(n_groups * sizeof(ggml_fp16_t));
+
+    // Timing
+    uint64_t start = mach_absolute_time();
+
+    ggml_metal_quantize_kv_cache_q8_batch_cpu(dev, kv_cache, dst_buf_cpu, scales_cpu,
+                                              total_elements, group_size);
+
+    uint64_t end = mach_absolute_time();
+
+    // Convert to milliseconds
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    uint64_t elapsed_ns = (end - start) * timebase.numer / timebase.denom;
+    double elapsed_ms = elapsed_ns / 1e6;
+
+    double data_mb = total_elements * 2.0 / 1024 / 1024;
+    double throughput_gb_s = data_mb / elapsed_ms;
+
+    fprintf(stderr, "Offline Quantization Complete:\n");
+    fprintf(stderr, "  Time: %.3f ms\n", elapsed_ms);
+    fprintf(stderr, "  Throughput: %.2f GB/s\n", throughput_gb_s);
+    fprintf(stderr, "  Memory Reduction: %.1fx (%.2f MB → %.2f MB)\n",
+            (double)(total_elements * 2) / (total_elements + n_groups * 2),
+            data_mb,
+            (total_elements + n_groups * 2.0) / 1024 / 1024);
+
+    free(dst_buf_cpu);
+    free(scales_cpu);
+}
+
+// ============================================================================
+// CPU-GPU Pipeline Quantization (Zero-Copy + Pipeline)
+// ============================================================================
+
+// Include CPU NEON header
+#include "ggml-metal-cpu-neon.h"
+
+// Pipeline quantization: CPU computes scales (NEON), GPU quantizes (Metal)
+// Overlaps CPU and GPU work to hide kernel launch overhead
+void ggml_metal_quantize_kv_cache_q8_pipeline_cpu(
+        ggml_metal_device_t dev,
+        const ggml_fp16_t * src_cpu,
+        int8_t            * dst_cpu,
+        ggml_fp16_t       * scales_cpu,
+        int                 n_layers,
+        int                 elements_per_layer,
+        int                 group_size) {
+
+    id<MTLDevice> device = ggml_metal_device_get_obj(dev);
+    int groups_per_layer = (elements_per_layer + group_size - 1) / group_size;
+    int total_elements = n_layers * elements_per_layer;
+    int total_groups = n_layers * groups_per_layer;
+
+    fprintf(stderr, "CPU-GPU Pipeline Quantization:\n");
+    fprintf(stderr, "  Layers: %d\n", n_layers);
+    fprintf(stderr, "  Elements per Layer: %d (%.2f MB)\n",
+            elements_per_layer, elements_per_layer * 2.0 / 1024 / 1024);
+    fprintf(stderr, "  Total Elements: %d (%.2f MB)\n",
+            total_elements, total_elements * 2.0 / 1024 / 1024);
+
+    // Zero-Copy buffers (UMA shared memory)
+    id<MTLBuffer> src_buf = [device 
+        newBufferWithBytesNoCopy:(void*)src_cpu
+        length:total_elements * sizeof(ggml_fp16_t)
+        options:MTLResourceStorageModeShared
+        deallocator:nil];
+    
+    id<MTLBuffer> dst_buf = [device 
+        newBufferWithBytesNoCopy:dst_cpu
+        length:total_elements * sizeof(int8_t)
+        options:MTLResourceStorageModeShared
+        deallocator:nil];
+    
+    id<MTLBuffer> scales_buf = [device 
+        newBufferWithBytesNoCopy:scales_cpu
+        length:total_groups * sizeof(ggml_fp16_t)
+        options:MTLResourceStorageModeShared
+        deallocator:nil];
+
+    // Get Metal resources
+    id<MTLCommandQueue> queue = ggml_metal_device_get_queue(dev);
+    ggml_metal_library_t lib = ggml_metal_device_get_library(dev);
+    id<MTLLibrary> library = ggml_metal_library_get_obj(lib);
+
+    // Prepare pipeline kernel
+    NSError *error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:@"kernel_quantize_kv_cache_q8_pipeline"];
+    if (!function) {
+        GGML_LOG_ERROR("%s: failed to get kernel_quantize_kv_cache_q8_pipeline function\n", __func__);
+        return;
+    }
+
+    id<MTLComputePipelineState> pipeline = [device
+        newComputePipelineStateWithFunction:function error:&error];
+    if (error) {
+        GGML_LOG_ERROR("%s: failed to create pipeline quantization pipeline: %s\n",
+                       __func__, [[error localizedDescription] UTF8String]);
+        return;
+    }
+
+    // Timing
+    uint64_t start_time = mach_absolute_time();
+
+    // Pipeline: CPU computes scales for layer N, GPU quantizes layer N-1
+    for (int layer = 0; layer < n_layers; layer++) {
+        int offset = layer * elements_per_layer;
+        int scale_offset = layer * groups_per_layer;
+
+        // Stage 1: CPU computes scales for current layer (NEON accelerated)
+        ggml_metal_cpu_compute_scales_neon(
+            src_cpu + offset,
+            scales_cpu + scale_offset,
+            groups_per_layer,
+            group_size
+        );
+
+        // Stage 2: GPU quantizes previous layer (async, overlapped with CPU)
+        if (layer > 0) {
+            int prev_offset = (layer - 1) * elements_per_layer;
+            int prev_scale_offset = (layer - 1) * groups_per_layer;
+
+            id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+            [encoder setComputePipelineState:pipeline];
+            [encoder setBuffer:src_buf offset:prev_offset * sizeof(ggml_fp16_t) atIndex:0];
+            [encoder setBuffer:dst_buf offset:prev_offset * sizeof(int8_t) atIndex:1];
+            [encoder setBuffer:scales_buf offset:prev_scale_offset * sizeof(ggml_fp16_t) atIndex:2];
+            [encoder setBytes:&elements_per_layer length:sizeof(int) atIndex:3];
+            [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+            MTLSize threadgroups = MTLSizeMake(groups_per_layer, 1, 1);
+            MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+            [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+            [encoder endEncoding];
+
+            [command_buffer commit];
+            // Don't wait - let it run async (pipeline overlap!)
+        }
+    }
+
+    // Process last layer (synchronous)
+    {
+        int last_offset = (n_layers - 1) * elements_per_layer;
+        int last_scale_offset = (n_layers - 1) * groups_per_layer;
+
+        id<MTLCommandBuffer> command_buffer = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command_buffer computeCommandEncoder];
+
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:src_buf offset:last_offset * sizeof(ggml_fp16_t) atIndex:0];
+        [encoder setBuffer:dst_buf offset:last_offset * sizeof(int8_t) atIndex:1];
+        [encoder setBuffer:scales_buf offset:last_scale_offset * sizeof(ggml_fp16_t) atIndex:2];
+        [encoder setBytes:&elements_per_layer length:sizeof(int) atIndex:3];
+        [encoder setBytes:&group_size length:sizeof(int) atIndex:4];
+
+        MTLSize threadgroups = MTLSizeMake(groups_per_layer, 1, 1);
+        MTLSize threadsPerThreadgroup = MTLSizeMake(32, 1, 1);
+
+        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threadsPerThreadgroup];
+        [encoder endEncoding];
+
+        [command_buffer commit];
+        [command_buffer waitUntilCompleted];  // Wait for last layer
+    }
+
+    // All GPU work is complete (last command buffer waited)
+    uint64_t end_time = mach_absolute_time();
+
+    // Convert to milliseconds
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    uint64_t elapsed_ns = (end_time - start_time) * timebase.numer / timebase.denom;
+    double elapsed_ms = elapsed_ns / 1e6;
+
+    double data_mb = total_elements * 2.0 / 1024 / 1024;
+    double throughput_gb_s = data_mb / elapsed_ms;
+
+    fprintf(stderr, "Pipeline Quantization Complete:\n");
+    fprintf(stderr, "  Total Time: %.3f ms\n", elapsed_ms);
+    fprintf(stderr, "  Throughput: %.2f GB/s\n", throughput_gb_s);
+    fprintf(stderr, "  Time per Layer: %.3f ms\n", elapsed_ms / n_layers);
 }

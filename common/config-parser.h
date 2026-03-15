@@ -234,6 +234,11 @@ inline void thunderllama_config_apply(common_params & params, const ThunderLLAMA
         ggml_type kv_type = GGML_TYPE_F16; // default
         if (kv_level == "f16")       kv_type = GGML_TYPE_F16;
         else if (kv_level == "q8_0") kv_type = GGML_TYPE_Q8_0;
+        else if (kv_level == "q8_0_metal") {
+            // GPU-side dynamic quantization (ThunderLLAMA)
+            kv_type = GGML_TYPE_F16;  // Storage uses FP16, quantize on-the-fly
+            // TODO: Set a flag to enable Metal quantization
+        }
         else if (kv_level == "q4_0") kv_type = GGML_TYPE_Q4_0;
         else if (kv_level == "q4_1") kv_type = GGML_TYPE_Q4_1;
         else if (kv_level == "bf16") kv_type = GGML_TYPE_BF16;
