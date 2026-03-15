@@ -323,6 +323,12 @@ inline bool thunderllama_config_load_and_apply(common_params & params, const std
         setenv("GGML_METAL_FUSION_DISABLE", "1", 1);
     }
 
+    // FUSED_QKV (QKV Projection Fusion - experimental)
+    // Default: disabled (0). Set to 1 to enable.
+    if (config.get_bool("FUSED_QKV", false)) {
+        setenv("FUSED_QKV", "1", 1);
+    }
+
     // === Apply params ===
     thunderllama_config_apply(params, config);
 

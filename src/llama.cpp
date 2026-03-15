@@ -10,6 +10,7 @@
 #include "llama-model-loader.h"
 #include "llama-model-saver.h"
 #include "llama-model.h"
+#include "llama-qkv-fusion.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -1023,6 +1024,10 @@ static struct llama_model * llama_model_load_from_file_impl(
         llama_model_free(model);
         return nullptr;
     }
+
+    // ThunderLLAMA: QKV Projection Fusion (Phase 1)
+    // Check if QKV fusion is enabled and applicable
+    llama_model_fuse_qkv(*model);
 
     return model;
 }

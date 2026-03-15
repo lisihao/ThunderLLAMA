@@ -46,11 +46,33 @@ DYLD_LIBRARY_PATH=./build/bin ./build/bin/test-kv-quantize-pipeline
 - 📖 [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
 - 🚀 [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
 
+### 🔥 K/V Projection Fusion (NEW!)
+
+**+9.8% TG, +8.5% PP** with dramatic stability improvement:
+
+- ✅ **GQA-Adapted** - Fuses K/V projections while keeping Q separate (for GQA 8:1 models)
+- ✅ **Zero-Copy Slicing** - `ggml_concat` + `ggml_view_2d` (no data copy overhead)
+- ✅ **84% Lower Variance** - TG stdev 5.15 → 0.82
+- ✅ **Bit-Identical Output** - Verified with seed=42, temp=0
+
+**Performance** (Qwen3-30B Q4_K_M, M4 Pro, 5-run):
+```
+                  Baseline          Fusion          Delta
+TG tok/s     65.90 ± 5.15    72.35 ± 0.82        +9.8%
+PP tok/s     74.72 ± 8.47    81.04 ± 0.60        +8.5%
+```
+
+**Quick Start**:
+```bash
+# Enable in thunderllama.conf (default: enabled)
+FUSED_QKV=1
+```
+
 ### Other ThunderLLAMA Features
 
-- **LMCache Integration** - Content-based KV cache reuse (256-token chunks)
+- **Metal Kernel Fusion** - MoE gating fusion, TG **+10-12%** on M-series chips
+- **LMCache Integration** - Content-based KV cache reuse (256-token chunks), **27x** repeat acceleration
 - **Paged Attention** - Efficient memory management for long contexts
-- **Metal Kernel Fusion** - Optimized GPU kernels for M-series chips
 - **Configuration-Driven** - All settings in `thunderllama.conf` (no CLI args needed)
 
 **Repository**: Fork of [llama.cpp](https://github.com/ggerganov/llama.cpp) with Apple Silicon optimizations

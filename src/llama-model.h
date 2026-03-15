@@ -236,6 +236,7 @@ struct llama_layer {
     struct ggml_tensor * wq        = nullptr;
     struct ggml_tensor * wk        = nullptr;
     struct ggml_tensor * wv        = nullptr;
+    struct ggml_tensor * wkv       = nullptr;  // ThunderLLAMA: K/V fusion for GQA (Phase 3)
     struct ggml_tensor * wo        = nullptr;
     struct ggml_tensor * wqkv      = nullptr;
     struct ggml_tensor * wq_a      = nullptr;

@@ -57,13 +57,14 @@
 | **Batch Size** | `-b N` | `2048` | 逻辑批大小 | 影响吞吐上限 | llama.cpp |
 | **Micro Batch** | `-ub N` | `512` | 物理批大小 | GPU 利用率 | llama.cpp |
 
-## 5. 硬件加速优化（6项）
+## 5. 硬件加速优化（7项）
 
 | 优化项 | 启用方式 | 默认值 | 作用 | 性能提升 | 来源 |
 |--------|---------|--------|------|---------|------|
 | **GPU Layers** | `-ngl 99` | `auto` | 卸载层数到 GPU | M4: 3-5x vs CPU | llama.cpp |
 | **Metal 优化** | 自动启用 (macOS) | - | Apple Silicon GPU 加速 | 自动优化 | llama.cpp |
 | **Metal Kernel Fusion** | `METAL_FUSION=1` | 启用 | ADD 融合 + MoE Gating 融合 | **TG +10-12%** | ThunderLLAMA |
+| **K/V Projection Fusion** | `FUSED_QKV=1` | 启用 | K/V 权重融合 (GQA 适配) | **TG +9.8%, PP +8.5%** | ThunderLLAMA |
 | **N_R0_Q5_K 调优** | 编译时 | `8` | Q5_K 每 simdgroup 处理行数 | **TG +2-3%** | ThunderLLAMA |
 | **CPU 线程** | `-t N` | `-1` (auto) | CPU 推理线程数 | 少量层用 CPU 时有效 | llama.cpp |
 | **Batch 线程** | `-tb N` | 同 `-t` | Prompt 处理线程数 | Prompt 阶段加速 | llama.cpp |
@@ -95,6 +96,7 @@
 | `THUNDERLLAMA_CHUNK_PREFILL` | 自适应分块大小 | `max(32, n_batch/slots)` | `tools/server/server-context.cpp:2120` |
 | `LLAMA_PAGED_ATTENTION` | 启用 Paged Attention | `0` | `src/llama-context.cpp:293` |
 | `GGML_METAL_FUSION_DISABLE` | 禁用 Metal 内核融合 | 未设置(启用) | `ggml/src/ggml-metal/ggml-metal-context.m` |
+| `FUSED_QKV` | 启用 K/V Projection Fusion | `1` | `src/llama-qkv-fusion.cpp` |
 
 ---
 
@@ -230,8 +232,20 @@ curl http://localhost:8080/lmcache/stats
 | Q5_K_M | 59.07 | 65.25 | **+10.5%** |
 | Q4_K_M | 70.35 | 79.12 | **+12.5%** |
 
+### K/V Projection Fusion 提速效果 (2026-03-15, 5-run benchmark)
+
+| 指标 | Baseline (FUSED_QKV=0) | Fusion (FUSED_QKV=1) | 提升 |
+|------|:---------------------:|:--------------------:|:----:|
+| **TG tok/s** | 65.90 ± 5.15 | **72.35 ± 0.82** | **+9.8%** |
+| **PP tok/s** | 74.72 ± 8.47 | **81.04 ± 0.60** | **+8.5%** |
+
+- **稳定性提升**: TG 标准差 5.15 → 0.82 (-84%), PP 标准差 8.47 → 0.60 (-93%)
+- **正确性验证**: Baseline vs Fusion 输出 IDENTICAL (seed=42, temp=0, greedy)
+- **覆盖率**: 48/48 layers (100%) on Qwen3-30B-A3B
+- **实现**: `ggml_concat(wk, wv)` + `ggml_view_2d` 切片 (GQA 8:1 适配)
+
 ---
 
-**文档版本**: v1.1
+**文档版本**: v1.2
 **更新日期**: 2026-03-15
-**验证方式**: 代码扫描 + 文档审查
+**验证方式**: 代码扫描 + 文档审查 + 性能基准测试 + 正确性验证

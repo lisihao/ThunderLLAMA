@@ -1,5 +1,5 @@
 # Mission
-ThunderLLAMA 性能优化 — Metal MoE Kernel Fusion + 全套调优
+ThunderLLAMA 持续优化 — Metal Fusion + GPU Pool + Paged Attention
 
 # Constraints
 - 不破坏现有 Clawgate + ThunderLLAMA 集成
@@ -7,10 +7,30 @@ ThunderLLAMA 性能优化 — Metal MoE Kernel Fusion + 全套调优
 - 正确性优先：输出必须与未优化版本 bit-identical
 
 # Current Plan
+
+## 已完成 Tiers
 1. ✅ Tier 1: CPU 线程分离 + KV cache f16 优化 (TG: 59→66.36)
 2. ✅ Tier 2: Q4_K_M 量化 (TG: 66.36→75.90, 纯带宽瓶颈)
 3. ✅ Tier 3: Metal MoE Kernel Fusion (TG: 59→65 Q5_K, 70→79 Q4_K)
-4. ⏳ 进一步优化：Normalization chain fusion（需要 graph 调度器改动）
+4. ✅ 扩展 Metal Kernel Fusion（4 个新模式）
+
+## 待完成任务 (从上次 session 恢复)
+
+### 独立任务
+- [ ] **#1 Metal Performance Shaders (MPS) 集成** — 用 Apple MPS 框架替代手写 kernel
+- [ ] **#2 Paged Attention 优化（对标 vllm-mlx）** — 重新实现，解决当前缺陷
+- [ ] **#9 Week 3: LRU 策略和最终优化** — LMCache/GPU Buffer Pool 驱逐策略
+
+### Metal JIT Fusion Pipeline (Week 6-8, 顺序依赖)
+- [ ] **#3 Week 6.1: ggml Graph 分析器** — 解析计算图，识别可融合模式
+- [ ] **#4 Week 6.2: Dependency Graph Builder** — 构建依赖关系图 (blocked by #3)
+- [ ] **#5 Week 7.1: Graph Rewriter** — 模式匹配 + 图变换 (blocked by #3, #4)
+- [ ] **#6 Week 7.2: Metal Kernel Code Generator** — 自动生成 Metal shader (blocked by #5)
+- [ ] **#7 Week 8.1: Metal JIT Compiler** — 运行时编译 + 缓存 (blocked by #6)
+- [ ] **#8 Week 8.2: 集成到 ggml-metal** — 完整 pipeline 集成 (blocked by #7)
+
+### Blocked
+- ⚠️ Normalization chain fusion（需要 graph 调度器改动，可能被 JIT pipeline 取代）
 
 # Decisions
 - [2026-03-15] MoE Fusion 只融合 gating 链 (SOFT_MAX→ARGSORT→GET_ROWS)，不融合 normalization chain：graph scheduler 将 MUL_MAT_ID 插在 GET_ROWS 和 SUM_ROWS 之间，无法相邻融合
@@ -18,6 +38,7 @@ ThunderLLAMA 性能优化 — Metal MoE Kernel Fusion + 全套调优
 - [2026-03-14] N_R0_Q5_K=8 编译时常量：7 组实测确认甜区
 - [2026-03-14] KV cache 用 f16 而非 q4_0/q8_0：短上下文下反量化开销 > 带宽节省
 - [2026-03-14] TG 用 4 线程、PP 用 8 线程：分离配置减少 GPU 带宽争抢
+- [2026-03-15] K/V Projection Fusion 完全验证: 性能+9.8% TG, 正确性 IDENTICAL, 已提交
 
 # Progress
 
@@ -32,12 +53,50 @@ ThunderLLAMA 性能优化 — Metal MoE Kernel Fusion + 全套调优
 - ✅ thunderllama.conf 更新: METAL_FUSION 配置项 + 性能基准刷新
 - ✅ config-parser.h 更新: METAL_FUSION → GGML_METAL_FUSION_DISABLE 映射
 - ✅ OPTIMIZATION_FEATURES.md 更新: Metal Kernel Fusion + 性能基准
+- ✅ Native KV Cache 量化（GPU-side）
+- ✅ 集成 KV Cache Pipeline Quantization 到 llama-kv-cache.cpp
+- ✅ End-to-End Benchmark - 真实 Qwen3-30B 模型测试
+- ✅ Week 1: GPU Buffer Pool 基础框架
+- ✅ Week 2: Metal Kernel 集成和优化
+- ✅ Remove L1 GPU Pool (Week 1 + Week 2)
+- ✅ KV Cache 量化全面对比测试（f16 vs q8_0 vs q4_0）
+  - 结论: q8_0 推荐（-2.2% 性能，-50% 内存）
+- ✅ **Task #9: K/V Projection Fusion (GQA Adapted)** - 2026-03-15 完成
+  - **最终性能 (5-run benchmark via server API)**:
+    - TG: 65.90±5.15 → **72.35±0.82** (**+9.8%**)
+    - PP: 74.72±8.47 → **81.04±0.60** (**+8.5%**)
+  - **稳定性提升**: TG stdev -84%, PP stdev -93%
+  - **正确性验证**: ✅ PASS — 输出 IDENTICAL (seed=42, temp=0, greedy)
+  - **覆盖率**: 48/48 layers (100%)
+  - 关键发现: Qwen3-30B/Qwen3.5-35B 是 GQA 8:1 模型
+  - 方案调整: 原方案（Q/K/V全融合）→ GQA适配版（K/V融合，Q分离）
+  - 实现方式: ggml_concat + ggml_view_2d (动态融合 + 零拷贝切片)
+  - 量化要求: 从 Q5_K 降至 Q4_K (扩大模型适用范围)
+  - 文件修改:
+    - src/llama-qkv-fusion.cpp (新增, 196 lines)
+    - src/llama-model.h (wkv 成员)
+    - src/models/qwen35moe.cpp (+45 lines)
+  - 环境变量: FUSED_QKV=1 启用
+  - 正确性验证: ✅ PASS — Baseline vs Fusion 输出 IDENTICAL (2026-03-15, server API test, seed=42, temp=0, greedy)
+
+- ✅ 扩展 Metal Kernel Fusion（4 个新模式）
 
 ## In-Progress
-- 无
+无
 
 ## Blocked
 - Normalization chain (SUM_ROWS→CLAMP→DIV) 融合受 graph scheduler 限制
+
+## Pending (从上次 session 恢复, 2026-03-15)
+- [ ] #1 Metal Performance Shaders (MPS) 集成
+- [ ] #2 Paged Attention 优化（对标 vllm-mlx）
+- [ ] #3 Week 6.1: ggml Graph 分析器
+- [ ] #4 Week 6.2: Dependency Graph Builder (← #3)
+- [ ] #5 Week 7.1: Graph Rewriter (← #3, #4)
+- [ ] #6 Week 7.2: Metal Kernel Code Generator (← #5)
+- [ ] #7 Week 8.1: Metal JIT Compiler (← #6)
+- [ ] #8 Week 8.2: 集成到 ggml-metal (← #7)
+- [ ] #9 Week 3: LRU 策略和最终优化
 
 # 风险点
 - ⚠️ 如果重新测试无法复现 3-4x 提升，可能需要检查：

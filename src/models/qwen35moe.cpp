@@ -2,6 +2,9 @@
 
 #include "llama-memory-recurrent.h"
 
+#include <cstdlib>  // for std::getenv
+#include <cstring>  // for strcmp
+
 llm_build_qwen35moe::llm_build_qwen35moe(const llama_model & model, const llm_graph_params & params) :
     llm_build_delta_net_base(params), model(model) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
@@ -135,11 +138,50 @@ ggml_tensor * llm_build_qwen35moe ::build_layer_attn(
     Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
     cb(Qcur, "Qcur_normed", il);
 
-    ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
-    cb(Kcur, "Kcur", il);
+    // ThunderLLAMA: K/V Fusion for GQA (Phase 3)
+    // Check if fusion is enabled via environment variable
+    ggml_tensor * Kcur = nullptr;
+    ggml_tensor * Vcur = nullptr;
 
-    ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
-    cb(Vcur, "Vcur", il);
+    const char * fused_qkv_env = std::getenv("FUSED_QKV");
+    const bool kv_fusion_enabled = (fused_qkv_env && strcmp(fused_qkv_env, "1") == 0);
+
+    if (kv_fusion_enabled && model.layers[il].wk && model.layers[il].wv) {
+        // Fused path: concat(wk, wv) → 1×MUL_MAT → 2×SLICE
+        // Concatenate wk and wv along dim=1 (output dimension)
+        ggml_tensor * wkv = ggml_concat(ctx0, model.layers[il].wk, model.layers[il].wv, 1);
+        cb(wkv, "wkv_concat", il);
+
+        // Single MUL_MAT with fused weights
+        ggml_tensor * KVcur = build_lora_mm(wkv, cur);
+        cb(KVcur, "KVcur_fused", il);
+
+        // Slice K and V from fused output
+        // wkv shape: [n_embd, n_embd_gqa * 2]
+        // KVcur shape after MUL_MAT: [n_embd_gqa * 2, n_tokens]
+        const int64_t n_embd_gqa = n_embd_head * n_head_kv;
+
+        // K: first half [0, n_embd_gqa)
+        Kcur = ggml_view_2d(ctx0, KVcur,
+            n_embd_gqa, n_tokens,
+            KVcur->nb[1],
+            0);
+        cb(Kcur, "Kcur_sliced", il);
+
+        // V: second half [n_embd_gqa, n_embd_gqa * 2)
+        Vcur = ggml_view_2d(ctx0, KVcur,
+            n_embd_gqa, n_tokens,
+            KVcur->nb[1],
+            n_embd_gqa * ggml_element_size(KVcur));
+        cb(Vcur, "Vcur_sliced", il);
+    } else {
+        // Original path: 2×MUL_MAT (fallback)
+        Kcur = build_lora_mm(model.layers[il].wk, cur);
+        cb(Kcur, "Kcur", il);
+
+        Vcur = build_lora_mm(model.layers[il].wv, cur);
+        cb(Vcur, "Vcur", il);
+    }
 
     // Apply K normalization
     Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
