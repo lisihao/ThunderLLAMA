@@ -1,0 +1,15 @@
+{
+  "quant_level": "q4_0",
+  "run_num": 1,
+  "timestamp": "2026-03-15T01:05:59-04:00",
+  "elapsed_time": 2.400858,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 41.65177615669065,
+  "pp_speed": 77.0557858898777,
+  "kv_cache_size": "1536.00 MiB",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": " 薛定谔方程是量子力学的核心方程之一，它描述了量子系统随时间演化的行为。方程的形式为：iℏ∂/∂tψ(x,t) = Hψ(x,t)，其中i是虚数单位，ℏ是约化普朗克常数，ψ(x,t)是波函数，H是哈密顿算符。方程的物理意义是：波函数的物理意义是：ψ(x,t)是波函数\n",
+  "perf_source": "calculated"
+}

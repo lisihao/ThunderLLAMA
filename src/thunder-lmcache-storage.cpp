@@ -1,5 +1,6 @@
 #include "thunder-lmcache-storage.h"
 #include "thunder-lmcache-eviction.h"
+#include "metal-buffer-pool.h"  // L1 GPU pool
 
 #include <cstring>
 #include <chrono>
@@ -138,10 +139,34 @@ ThunderChunkStorage::ThunderChunkStorage(
             prefetch_hot_chunks(100);
         }
     }
+
+    // Initialize L1 (GPU Metal Buffer Pool) - Optional high-performance layer
+    // If Metal is unavailable, L2/L3 will continue to work normally
+    fprintf(stderr, "[ThunderChunkStorage] Initializing L1 GPU cache (Metal Buffer Pool)...\n");
+
+    metal_pool_ = create_metal_buffer_pool(2ULL * 1024 * 1024 * 1024);  // 2GB (合理大小，避免内存压力)
+
+    if (metal_pool_ != nullptr) {
+        l1_enabled_ = true;
+        fprintf(stderr, "[ThunderChunkStorage] ✓ L1 GPU cache initialized successfully (2GB)\n");
+        fprintf(stderr, "[ThunderChunkStorage] 🚀 GPU-side cache enabled: ~8x speedup expected\n");
+    } else {
+        l1_enabled_ = false;
+        fprintf(stderr, "[ThunderChunkStorage] ⚠️  L1 GPU cache DISABLED - Metal not available\n");
+        fprintf(stderr, "[ThunderChunkStorage] ℹ️  Falling back to L2 (CPU) + L3 (Disk) cache\n");
+    }
 }
 
 ThunderChunkStorage::~ThunderChunkStorage() {
     std::unique_lock<std::shared_mutex> lock(mutex_);  // Cleanup resources
+
+    // Cleanup L1 GPU pool first
+    if (metal_pool_ != nullptr) {
+        fprintf(stderr, "[ThunderChunkStorage] Cleaning up L1 GPU cache...\n");
+        metal_pool_->cleanup();
+        delete metal_pool_;
+        metal_pool_ = nullptr;
+    }
 
     // Persist all L2 chunks to L3 before shutdown
     fprintf(stderr, "[ThunderChunkStorage] Persisting %zu L2 chunks to disk...\n", l2_cache_.size());
@@ -321,6 +346,20 @@ thunder_kv_chunk * ThunderChunkStorage::get(const thunder_kv_chunk_key & key) {
 
     uint64_t key_hash = hash_key(key);
     fprintf(stderr, "[Storage GET] key_hash=%016llx, l2_cache size=%zu\n", key_hash, l2_cache_.size());
+
+    // Check L1 (GPU) first if enabled
+    if (l1_enabled_ && metal_pool_ != nullptr) {
+        size_t offset = metal_pool_->get_offset(key_hash);
+        if (offset != (size_t)-1) {
+            // L1 hit! Data is in GPU pool
+            total_hits_++;
+            fprintf(stderr, "[Storage GET] L1 HIT: offset=%zu (GPU pool)\n", offset);
+
+            // Week 1: For now, we still return from L2/L3 (fall through)
+            // Week 2: Will implement Metal blit to copy from GPU to KV cache
+            // This is just tracking that the data is available in GPU
+        }
+    }
 
     // Check L2
     auto l2_it = l2_cache_.find(key_hash);
@@ -623,6 +662,37 @@ void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
     while (freed < target_free_bytes && !l2_cache_.empty()) {
         freed += evict_one_l2_to_l3();
     }
+}
+
+bool ThunderChunkStorage::blit_from_l1(const thunder_kv_chunk_key & key,
+                                        void * dst_buffer,
+                                        size_t dst_offset,
+                                        size_t chunk_size) {
+    // Check if L1 is enabled
+    if (!l1_enabled_ || metal_pool_ == nullptr) {
+        return false;  // L1 not available, caller should use fallback
+    }
+
+    uint64_t key_hash = hash_key(key);
+
+    // Try to blit from L1 GPU pool (dst_buffer cast handled inside .mm file)
+    bool success = metal_pool_->blit_to_buffer(key_hash,
+                                                dst_buffer,
+                                                dst_offset,
+                                                chunk_size);
+
+    if (success) {
+        // L1 hit! Update stats
+        std::lock_guard<std::mutex> lock(mutex_);
+        total_hits_++;
+        access_freq_[key_hash]++;
+        total_accesses_++;
+
+        fprintf(stderr, "[ThunderChunkStorage] L1 BLIT: hash=%016llx, dst_offset=%zu, size=%zu\n",
+                (unsigned long long)key_hash, dst_offset, chunk_size);
+    }
+
+    return success;
 }
 
 size_t ThunderChunkStorage::get_cpu_usage_bytes() const {

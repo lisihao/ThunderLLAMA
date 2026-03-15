@@ -1,0 +1,14 @@
+{
+  "quant_level": "q8_0",
+  "run_num": 1,
+  "timestamp": "2026-03-15T01:03:28-04:00",
+  "elapsed_time": 2.098762000,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": ,
+  "pp_speed": ,
+  "kv_cache_size": "",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": "薛定谔方程是量子力学的基本方程之一，描述了量子系统随时间演化的行为。它由奥地利物理学家薛定谔于1926年提出。薛定谔方程的数学形式为：iħ(∂ψ/∂t) = Hψ，其中i是虚数单位，ħ是约化约化约化约化约化约化约化约化约化约化约化约化约化约化约化\n"
+}

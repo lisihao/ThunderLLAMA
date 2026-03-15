@@ -1,0 +1,15 @@
+{
+  "quant_level": "q8_0",
+  "run_num": 5,
+  "timestamp": "2026-03-15T01:05:28-04:00",
+  "elapsed_time": 2.087805,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 47.89719346394898,
+  "pp_speed": 88.60980790830561,
+  "kv_cache_size": "1536.00 MiB",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": " 薛定谔方程是量子力学中的基本方程之一，描述了量子系统随时间演化的行为。它由奥地利物理学家埃尔温·薛定谔于1926年提出，形式上是一个偏微分方程，用来计算量子系统的波函数，从而预测粒子的可能状态和行为。\n\n薛定谔方程的物理意义。 薓。 話。 話。 話。 話。 �\n",
+  "perf_source": "calculated"
+}

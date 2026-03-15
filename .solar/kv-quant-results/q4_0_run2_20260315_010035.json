@@ -1,0 +1,15 @@
+{
+  "quant_level": "q4_0",
+  "run_num": 2,
+  "timestamp": "2026-03-15T01:06:29-04:00",
+  "elapsed_time": 2.107208,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 47.45615999939256,
+  "pp_speed": 87.79389599887624,
+  "kv_cache_size": "1536.00 MiB",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": " 薛定谔方程是量子力学的核心方程之一，由奥地利物理学家埃尔温·薛定谔于1926年提出。它描述了量子系统随时间演化的行为，类似于经典力学中牛顿第二定律的作用。薛定谔方程的形式为：\n\niℏ∂ψ/∂t = Ĥψ\n\n其中：\n\nℏ  1  1  1  1  1  1  1  1\n",
+  "perf_source": "calculated"
+}

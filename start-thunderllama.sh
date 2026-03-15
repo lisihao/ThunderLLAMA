@@ -21,8 +21,12 @@ echo "✅ 读取配置文件: $CONFIG_FILE"
 # ============================================================================
 # 加载配置
 # ============================================================================
-# 直接加载配置文件（Bash 会自动忽略注释）
-source "$CONFIG_FILE"
+# 读取配置文件（忽略注释和空行，移除行内注释）
+# 使用临时文件避免 process substitution 问题
+TEMP_CONFIG=$(mktemp)
+grep -v '^#' "$CONFIG_FILE" | grep -v '^$' | sed 's/#.*//' | sed 's/[[:space:]]*$//' > "$TEMP_CONFIG"
+source "$TEMP_CONFIG"
+rm -f "$TEMP_CONFIG"
 
 echo "✅ 配置加载完成"
 
@@ -33,10 +37,18 @@ echo ""
 echo "=== 预检查 ==="
 
 # 1. 检查模型文件
-MODEL_PATH_EXPANDED="${MODEL_PATH/#\~/$HOME}"
-eval MODEL_PATH_EXPANDED="$MODEL_PATH_EXPANDED"  # 展开 $HOME 等变量
+# 展开环境变量和波浪号
+MODEL_PATH_EXPANDED=$(eval echo "$MODEL_PATH")
+
+if [ -z "$MODEL_PATH_EXPANDED" ]; then
+    echo "MODEL_PATH 未设置或为空"
+    echo "   请检查 thunderllama.conf 中的 MODEL_PATH 配置"
+    exit 1
+fi
+
 if [ ! -f "$MODEL_PATH_EXPANDED" ]; then
     echo "❌ 模型文件不存在: $MODEL_PATH_EXPANDED"
+    echo "   请检查路径是否正确"
     exit 1
 fi
 echo "✅ 模型文件: $MODEL_PATH_EXPANDED"
@@ -124,6 +136,7 @@ echo "=== 构建启动命令 ==="
 # ThunderLLAMA 只从 thunderllama.conf 读取配置
 # 不接受命令行参数（已在 server.cpp 中禁用）
 CMD="$SCRIPT_DIR/build/bin/llama-server"
+
 
 # 日志重定向
 if [ -n "$LOG_FILE" ]; then

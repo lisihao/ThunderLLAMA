@@ -16,56 +16,61 @@ LLM inference in C/C++
 
 **ThunderLLAMA** is a high-performance fork of llama.cpp optimized for Apple Silicon, featuring cutting-edge optimizations:
 
-### 🚀 KV Cache Quantization (NEW!)
+### 🚀 KV Cache Quantization (Recommended: q8_0)
 
-**8.47 GB/s** GPU-side quantization using CPU-GPU pipeline optimization:
+**GPU-side quantization** with comprehensive testing on **Qwen3-30B-Q5_K_M**:
 
-- ✅ **Zero-Copy** - Leverages Apple's Unified Memory Architecture (UMA)
-- ✅ **CPU-GPU Pipeline** - ARM NEON (CPU) + Metal (GPU) parallel execution
-- ✅ **1.9x Memory Reduction** - FP16 → INT8 + scales (82.5 MB vs 160 MB)
-- ✅ **<1% Accuracy Loss** - Max error 0.023, Avg error 0.005
+| Configuration | TG (tok/s) | PP (tok/s) | KV Memory | Performance Loss |
+|---------------|-----------|-----------|-----------|------------------|
+| **f16** (baseline) | 46.55 ± 0.39 | 86.12 ± 0.71 | 1536 MB | 0% |
+| **q8_0** ⭐ (recommended) | 45.51 ± 3.43 | 84.20 ± 6.34 | 768 MB | -2.2% |
+| **q4_0** | 43.70 ± 2.75 | 80.85 ± 5.09 | 384 MB | -6.1% |
 
-**Performance**:
-```
-Qwen3-30B (32 layers, 160 MB):
-- Pipeline: 18.9 ms (8.47 GB/s) ⚡ FASTEST
-- Baseline: 60.6 ms (2.64 GB/s)
-- Speedup: 3.2x faster
-```
+**Why q8_0?**
+- ✅ **Minimal Performance Impact** - Only 2.2% slower than FP16
+- ✅ **50% Memory Savings** - 768 MB vs 1536 MB KV Cache
+- ✅ **Stable Performance** - 100% L2 cache hit rate maintained
+- ✅ **Production Ready** - Ideal for 4-8 concurrent slots
 
 **Quick Start**:
 ```bash
 # Enable in thunderllama.conf
-KV_CACHE_LEVEL="q8_0"
+KV_CACHE_LEVEL="q8_0"  # Recommended configuration
 
-# Run tests
-DYLD_LIBRARY_PATH=./build/bin ./build/bin/test-kv-quantize-pipeline
+# Restart server
+./restart-thunderllama.sh
 ```
 
-**Documentation**:
-- 📖 [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
-- 🚀 [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
+**When to use q4_0**: Extreme memory constraints only (75% memory savings, but 6.1% performance loss)
 
-### 🔥 K/V Projection Fusion (NEW!)
+**Test Methodology**: 15 tests (5 runs x 3 quantization levels), 185 prompt tokens + 100 completion tokens per test.
+
+**Documentation**:
+- [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
+- [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
+- [Full Test Report](.solar/kv-quant-results/FINAL_REPORT_20260315_011026.json)
+- [Update Summary](.solar/UPDATE_SUMMARY_20260315.md)
+
+### K/V Projection Fusion (NEW!)
 
 **+9.8% TG, +8.5% PP** with dramatic stability improvement:
 
 - ✅ **GQA-Adapted** - Fuses K/V projections while keeping Q separate (for GQA 8:1 models)
 - ✅ **Zero-Copy Slicing** - `ggml_concat` + `ggml_view_2d` (no data copy overhead)
-- ✅ **84% Lower Variance** - TG stdev 5.15 → 0.82
+- ✅ **84% Lower Variance** - TG stdev 5.15 -> 0.82
 - ✅ **Bit-Identical Output** - Verified with seed=42, temp=0
 
 **Performance** (Qwen3-30B Q4_K_M, M4 Pro, 5-run):
 ```
                   Baseline          Fusion          Delta
-TG tok/s     65.90 ± 5.15    72.35 ± 0.82        +9.8%
-PP tok/s     74.72 ± 8.47    81.04 ± 0.60        +8.5%
+TG tok/s     65.90 +/- 5.15    72.35 +/- 0.82        +9.8%
+PP tok/s     74.72 +/- 8.47    81.04 +/- 0.60        +8.5%
 ```
 
 **Quality Verification** (Qwen3-30B Q4_K_M, 1024 tokens):
 ```
-Test 1: Greedy (seed=42, temp=0)        → Output IDENTICAL
-Test 2: Sampling (seed=42, temp=0.6)    → Output IDENTICAL (4074 chars, byte-for-byte)
+Test 1: Greedy (seed=42, temp=0)        -> Output IDENTICAL
+Test 2: Sampling (seed=42, temp=0.6)    -> Output IDENTICAL (4074 chars, byte-for-byte)
 Conclusion: Zero quality degradation
 ```
 

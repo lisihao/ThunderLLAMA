@@ -1,0 +1,15 @@
+{
+  "quant_level": "f16",
+  "run_num": 4,
+  "timestamp": "2026-03-15T01:02:29-04:00",
+  "elapsed_time": 2.135453,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 46.82847152337232,
+  "pp_speed": 86.6326723182388,
+  "kv_cache_size": "",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": " 薛定谔方程是量子力学的基本方程，描述了量子系统随时间演化的行为。它由奥地利物理学家埃尔温·薛定谔于1926年提出，形式为：\n\niħ(∂ψ/∂t) = Hψ\n\n其中，i是虚数单位，ħ是约化普朗克常数，ψ是波函数，H是哈密顿算符，代表系统的总能量。\n\n物理意义：\n1. �\n",
+  "perf_source": "calculated"
+}
