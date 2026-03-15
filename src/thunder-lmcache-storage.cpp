@@ -129,11 +129,11 @@ ThunderChunkStorage::ThunderChunkStorage(
     // If Metal is unavailable, L2/L3 will continue to work normally
     fprintf(stderr, "[ThunderChunkStorage] Initializing L1 GPU cache (Metal Buffer Pool)...\n");
 
-    metal_pool_ = create_metal_buffer_pool(10ULL * 1024 * 1024 * 1024);  // 10GB
+    metal_pool_ = create_metal_buffer_pool(2ULL * 1024 * 1024 * 1024);  // 2GB (合理大小，避免内存压力)
 
     if (metal_pool_ != nullptr) {
         l1_enabled_ = true;
-        fprintf(stderr, "[ThunderChunkStorage] ✓ L1 GPU cache initialized successfully (10GB)\n");
+        fprintf(stderr, "[ThunderChunkStorage] ✓ L1 GPU cache initialized successfully (2GB)\n");
         fprintf(stderr, "[ThunderChunkStorage] 🚀 GPU-side cache enabled: ~8x speedup expected\n");
     } else {
         l1_enabled_ = false;

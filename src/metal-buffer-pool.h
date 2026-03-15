@@ -40,10 +40,10 @@ public:
      * Initialize the pool
      *
      * @param device Metal device
-     * @param pool_size_bytes Total pool size (default: 10GB)
+     * @param pool_size_bytes Total pool size (default: 2GB)
      * @return true if initialization succeeded
      */
-    bool init(id device, size_t pool_size_bytes = 10ULL * 1024 * 1024 * 1024);
+    bool init(id device, size_t pool_size_bytes = 2ULL * 1024 * 1024 * 1024);
 
     /**
      * Store a KV cache chunk in GPU pool
@@ -181,9 +181,9 @@ private:
  * This function provides a C++-compatible way to create and initialize
  * a MetalBufferPool without requiring Objective-C++ in the caller.
  *
- * @param pool_size_bytes Total pool size (default: 10GB)
+ * @param pool_size_bytes Total pool size (default: 2GB)
  * @return Pointer to initialized MetalBufferPool, or nullptr if failed
  *
  * Note: Caller is responsible for calling cleanup() and deleting the pool
  */
-MetalBufferPool * create_metal_buffer_pool(size_t pool_size_bytes = 10ULL * 1024 * 1024 * 1024);
+MetalBufferPool * create_metal_buffer_pool(size_t pool_size_bytes = 2ULL * 1024 * 1024 * 1024);
