@@ -62,6 +62,13 @@ TG tok/s     65.90 ± 5.15    72.35 ± 0.82        +9.8%
 PP tok/s     74.72 ± 8.47    81.04 ± 0.60        +8.5%
 ```
 
+**Quality Verification** (Qwen3-30B Q4_K_M, 1024 tokens):
+```
+Test 1: Greedy (seed=42, temp=0)        → Output IDENTICAL
+Test 2: Sampling (seed=42, temp=0.6)    → Output IDENTICAL (4074 chars, byte-for-byte)
+Conclusion: Zero quality degradation
+```
+
 **Quick Start**:
 ```bash
 # Enable in thunderllama.conf (default: enabled)
