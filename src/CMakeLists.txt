@@ -157,6 +157,8 @@ add_library(llama
             ../include/thunder-lmcache-control.h
             thunder-lmcache-eviction.cpp
             ../include/thunder-lmcache-eviction.h
+            metal-buffer-pool.mm
+            metal-buffer-pool.h
             ../examples/gguf-hash/deps/xxhash/xxhash.c
             )
 
@@ -172,6 +174,11 @@ target_include_directories(llama PRIVATE ../examples/gguf-hash/deps/xxhash)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml z)
+
+# Link Metal and CoreFoundation frameworks (for metal-buffer-pool.mm)
+if (APPLE)
+    target_link_libraries(llama PUBLIC "-framework Metal" "-framework Foundation" "-framework CoreFoundation")
+endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)

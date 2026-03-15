@@ -21,8 +21,12 @@ echo "✅ 读取配置文件: $CONFIG_FILE"
 # ============================================================================
 # 加载配置
 # ============================================================================
-# 读取配置文件（忽略注释和空行）
-source <(grep -v '^#' "$CONFIG_FILE" | grep -v '^$')
+# 读取配置文件（忽略注释和空行，移除行内注释）
+# 使用临时文件避免 process substitution 问题
+TEMP_CONFIG=$(mktemp)
+grep -v '^#' "$CONFIG_FILE" | grep -v '^$' | sed 's/#.*//' | sed 's/[[:space:]]*$//' > "$TEMP_CONFIG"
+source "$TEMP_CONFIG"
+rm -f "$TEMP_CONFIG"
 
 echo "✅ 配置加载完成"
 
@@ -33,9 +37,20 @@ echo ""
 echo "=== 预检查 ==="
 
 # 1. 检查模型文件
-MODEL_PATH_EXPANDED="${MODEL_PATH/#\~/$HOME}"
+# 展开环境变量和波浪号
+MODEL_PATH_EXPANDED=$(eval echo "$MODEL_PATH")
+echo "[DEBUG] MODEL_PATH=$MODEL_PATH"
+echo "[DEBUG] MODEL_PATH_EXPANDED=$MODEL_PATH_EXPANDED"
+
+if [ -z "$MODEL_PATH_EXPANDED" ]; then
+    echo "❌ MODEL_PATH 未设置或为空"
+    echo "   请检查 thunderllama.conf 中的 MODEL_PATH 配置"
+    exit 1
+fi
+
 if [ ! -f "$MODEL_PATH_EXPANDED" ]; then
     echo "❌ 模型文件不存在: $MODEL_PATH_EXPANDED"
+    echo "   请检查路径是否正确"
     exit 1
 fi
 echo "✅ 模型文件: $MODEL_PATH_EXPANDED"
@@ -110,9 +125,68 @@ echo "✅ THUNDERLLAMA_CHUNK_PREFILL=$THUNDERLLAMA_CHUNK_PREFILL"
 echo ""
 echo "=== 构建启动命令 ==="
 
-# ThunderLLAMA 只从 thunderllama.conf 读取配置
-# 不接受命令行参数（已在 server.cpp 中禁用）
+# 基础命令
 CMD="$SCRIPT_DIR/build/bin/llama-server"
+
+# 模型和上下文
+CMD="$CMD -m \"$MODEL_PATH_EXPANDED\""
+CMD="$CMD -c ${CONTEXT_SIZE:-4096}"
+
+# GPU offload
+CMD="$CMD -ngl ${GPU_LAYERS:-99}"
+
+# Flash Attention
+if [ "$FLASH_ATTENTION" = "on" ]; then
+    CMD="$CMD -fa"
+fi
+
+# CPU 线程
+CMD="$CMD -t ${CPU_THREADS:-4}"
+CMD="$CMD -tb ${CPU_THREADS_BATCH:-8}"
+
+# 并发配置
+CMD="$CMD --parallel ${PARALLEL_SLOTS:-4}"
+
+# Batch 配置
+CMD="$CMD -b ${BATCH_SIZE:-4096}"
+CMD="$CMD -ub ${UBATCH_SIZE:-1024}"
+
+# Cache 配置
+if [ -n "$CACHE_REUSE" ]; then
+    CMD="$CMD --cache-reuse $CACHE_REUSE"
+fi
+if [ -n "$CACHE_RAM" ]; then
+    CMD="$CMD --cache-ram $CACHE_RAM"
+fi
+if [ "$KV_UNIFIED" = "1" ]; then
+    CMD="$CMD --kv-unified"
+fi
+
+# Continuous Batching
+if [ "$CONT_BATCHING" = "1" ]; then
+    CMD="$CMD --cont-batching"
+fi
+if [ -n "$PRIO_BATCH" ]; then
+    CMD="$CMD --prio-batch $PRIO_BATCH"
+fi
+
+# Graph reuse
+if [ "$GRAPH_REUSE" = "1" ]; then
+    CMD="$CMD --graph-reuse"
+fi
+
+# 端口
+CMD="$CMD --port ${SERVER_PORT:-30000}"
+
+# Verbose
+if [ "$VERBOSE" = "1" ]; then
+    CMD="$CMD --verbose"
+fi
+
+# Metal Fusion (通过环境变量控制)
+if [ "$METAL_FUSION" = "0" ]; then
+    export GGML_METAL_FUSION_DISABLE=1
+fi
 
 # 日志重定向
 if [ -n "$LOG_FILE" ]; then
@@ -124,7 +198,6 @@ fi
 echo "启动命令:"
 echo "$CMD"
 echo ""
-echo "注意: 所有参数从 thunderllama.conf 读取，不使用命令行参数"
 
 # ============================================================================
 # 启动服务器

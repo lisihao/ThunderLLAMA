@@ -260,6 +260,17 @@ task_params server_task::params_from_json_cmpl(
     auto stream_opt         = json_value(data,       "stream_options",     json::object());
     params.include_usage    = json_value(stream_opt, "include_usage",      false);
     params.cache_prompt     = json_value(data,       "cache_prompt",       defaults.cache_prompt);
+
+    // ThunderLLAMA: 当 THUNDER_LMCACHE_EXCLUSIVE=1 时，强制禁用内置 prompt cache
+    // 原因: 内置 cache 会干扰 LMCache 测试，导致性能数据不准确
+    // 用途: 测试时设为 1（纯净测试），生产时设为 0（最大化性能）
+    const char * lmcache_exclusive = getenv("THUNDER_LMCACHE_EXCLUSIVE");
+    if (lmcache_exclusive && atoi(lmcache_exclusive) == 1) {
+        params.cache_prompt = false;
+        fprintf(stderr, "[LMCACHE_EXCLUSIVE] Built-in prompt cache disabled\n");
+        fflush(stderr);
+    }
+
     params.return_tokens    = json_value(data,       "return_tokens",      false);
     params.return_progress  = json_value(data,       "return_progress",    false);
     auto max_tokens         = json_value(data,       "max_tokens",         defaults.n_predict);

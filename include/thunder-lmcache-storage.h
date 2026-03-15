@@ -6,6 +6,9 @@
 #include "thunder-lmcache.h"
 #include "thunder-lmcache-hash.h"
 
+// Forward declaration for MetalBufferPool
+class MetalBufferPool;
+
 #ifdef __cplusplus
 
 #include <unordered_map>
@@ -261,7 +264,18 @@ public:
 
 private:
     // ========================================================================
-    // L2 (CPU Heap) Storage
+    // L1 (GPU Metal Buffer Pool) Storage - Hot Cache
+    // ========================================================================
+
+    // GPU buffer pool (10GB Metal buffer on unified memory)
+    // Eliminates CPU→GPU transfer (~8ms → ~2ms)
+    MetalBufferPool * metal_pool_ = nullptr;
+
+    // L1 enabled flag (false if Metal device unavailable or init failed)
+    bool l1_enabled_ = false;
+
+    // ========================================================================
+    // L2 (CPU Heap) Storage - Warm Cache
     // ========================================================================
 
     // Map: key hash -> chunk

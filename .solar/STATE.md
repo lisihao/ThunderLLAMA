@@ -1,5 +1,7 @@
 # Mission
-ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5_K 65→78+ tok/s)
+ThunderLLAMA 优化双线并行：
+1. **GPU-Side Cache** — 90-100x prefill skip speedup (当前 65x)
+2. **Metal GPU 深度优化** — Tier A/B 内核融合与 GEMV 加速 (Q5_K 65→78+ tok/s)
 
 # Constraints
 - 不破坏现有 Clawgate + ThunderLLAMA 集成
@@ -8,7 +10,45 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 
 # Current Plan
 
-## 已完成
+## 🎯 GPU-Side Cache 开发（优先级最高）
+
+### Phase 1: 已完成设计
+- ✅ 技术设计文档：`docs/GPU-SIDE-CACHE-DESIGN.md`
+- ✅ 架构设计更新：`docs/architecture-design.md` Section 10
+- ✅ README 更新：特性说明
+- ✅ Task 创建：#14, #15, #16
+
+### Phase 2: Week 1 - GPU Buffer Pool（完成 80%）
+**Task #14** - 目标：75x speedup
+- ✅ 创建 `MetalBufferPool` class
+- ✅ 预分配 10GB shared buffer (MTLResourceStorageModeShared)
+- ✅ 实现 `store()`/`get_offset()` 接口
+- ✅ LRU eviction 逻辑
+- ✅ 集成到 `ThunderChunkStorage` (L1 → L2 → L3)
+- ✅ C++ 工厂函数 `create_metal_buffer_pool()`
+- ✅ 编译成功（无错误）
+- [ ] 单元测试
+- [ ] 运行时验证（启动 llama-server 测试 L1 初始化）
+
+### Phase 3: Week 2 - Metal Kernel 集成
+**Task #15** - 目标：85x speedup
+- [ ] 修改 `llama-context.cpp` prefill skip 逻辑
+- [ ] Metal blit encoder 集成
+- [ ] Benchmark 对比 CPU-side cache
+- [ ] Metal GPU profiler 性能分析
+
+### Phase 4: Week 3 - LRU 策略和最终优化
+**Task #16** - 目标：90-100x speedup
+- [ ] GPU pool 满时，evict to L2
+- [ ] L2/L3 热 chunk promote to L1
+- [ ] 多 slot 并发测试（4 slots）
+- [ ] 端到端 benchmark（90-100x 目标）
+
+---
+
+## Metal GPU 内核优化（并行进行）
+
+### 已完成
 1. ✅ Tier 1: CPU 线程分离 + KV cache f16 优化 (TG: 59→66.36)
 2. ✅ Tier 2: Q4_K_M 量化 (TG: 66.36→75.90, 纯带宽瓶颈)
 3. ✅ Tier 3: Metal MoE Kernel Fusion (TG: 59→65 Q5_K, 70→79 Q4_K)
@@ -53,6 +93,8 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 | I2 | Grafana 仪表板 | ⏳ 待做 |
 
 # Decisions
+- [2026-03-14] **GPU-Side Cache 架构**：采用三层架构（L1 GPU 10GB → L2 CPU 2GB → L3 Disk 100GB），利用 M4 Pro 统一内存架构消除 CPU→GPU 传输瓶颈（~8ms）。目标 90-100x speedup
+- [2026-03-14] **EXCLUSIVE 模式**：添加 THUNDER_LMCACHE_EXCLUSIVE=1 配置，禁用内置 prompt cache 避免干扰 LMCache 测试。实测 65.22x speedup（vs 62x 共存模式）
 - [2026-03-15] A1 验证: Metal 后端 ADD 链融合已覆盖 MoE 聚合的 7×ADD，无需额外实现。实测 TG +7.3% (59.57 vs 55.50 tok/s)。每层每次 eval 都确认 "fuse: ADD x 7"
 - [2026-03-15] MoE Fusion 只融合 gating 链 (SOFT_MAX→ARGSORT→GET_ROWS)，不融合 normalization chain：graph scheduler 将 MUL_MAT_ID 插在 GET_ROWS 和 SUM_ROWS 之间，无法相邻融合
 - [2026-03-15] METAL_FUSION 配置项加入 thunderllama.conf：通过 GGML_METAL_FUSION_DISABLE 环境变量控制
@@ -63,6 +105,22 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 # Progress
 
 ## Done
+
+### GPU-Side Cache 准备工作（2026-03-14）
+- ✅ EXCLUSIVE 模式实现：禁用内置 prompt cache（server-task.cpp, config-parser.h）
+  - 性能验证：65.22x speedup（vs 62x 共存模式）
+  - 配置项：THUNDER_LMCACHE_EXCLUSIVE=1
+- ✅ GPU-Side Cache 技术设计：`docs/GPU-SIDE-CACHE-DESIGN.md`
+  - 三层架构设计（L1 GPU → L2 CPU → L3 Disk）
+  - 性能预测：90-100x speedup
+  - 风险评估和缓解措施
+- ✅ 文档更新：
+  - `docs/architecture-design.md` Section 10
+  - `README.md` 特性说明
+  - `.solar/STATE.md` Mission 和 Plan 更新
+- ✅ Task 创建：#14 (Week 1), #15 (Week 2), #16 (Week 3)
+
+### Metal GPU 内核优化
 - ✅ A1 Fused Expert Aggregation 验证 (build 8389)
   - Metal 后端 ADD 链融合 (kernel_bin_fuse_impl) 已自动覆盖 MoE 7×ADD
   - GGML_METAL_FUSION_DEBUG=2 确认：每层每 eval 均 "fuse: ADD x 7"
@@ -80,7 +138,20 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 - ✅ OPTIMIZATION_FEATURES.md 更新: Metal Kernel Fusion + 性能基准
 
 ## In-Progress
-- 无
+- 🔥 **Task #14**: Week 1 - GPU Buffer Pool 基础框架（80% 完成）
+  - 目标：实现 MetalBufferPool class，预分配 10GB GPU buffer
+  - 预期性能：65x → 75x
+  - 已完成：
+    - ✅ `metal-buffer-pool.{h,mm}` 实现（10GB MTLResourceStorageModeShared）
+    - ✅ LRU eviction 逻辑（`evict_lru()`, `update_lru()`）
+    - ✅ `create_metal_buffer_pool()` C++ 工厂函数
+    - ✅ `ThunderChunkStorage` 集成（L1 → L2 → L3）
+    - ✅ `put()` 优先存入 L1
+    - ✅ `get()` 优先从 L1 查找
+    - ✅ 编译成功（build 8390）
+  - 待完成：
+    - [ ] 单元测试
+    - [ ] 运行时验证（启动 llama-server 测试 L1 初始化）
 
 ## Blocked
 - Normalization chain (SUM_ROWS→CLAMP→DIV) 融合受 graph scheduler 限制

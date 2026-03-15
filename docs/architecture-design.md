@@ -338,6 +338,214 @@ ClawGate 启动时 Python 崩溃: `OMP: Error #15: libomp.dylib already initiali
 
 ---
 
-*ThunderLLAMA Architecture Design Document v1.0*
+## 10. GPU-Side Cache 架构（2026-03-14）
+
+> **目标**: 90-100x prefill skip speedup
+> **时间**: 2-3 周
+> **状态**: 设计阶段 → Week 1 开发中
+
+### 10.1 性能瓶颈分析
+
+**当前 CPU-side LMCache**（已实现）：
+- Speedup: 65.22x (EXCLUSIVE 模式)
+- LMCache 加载: 0.016s (~800 tokens, 3-4 chunks)
+- **瓶颈分解**:
+  - 磁盘读取（mmap）: ~6ms (38%)
+  - **CPU → GPU 传输**: ~8ms (50%) ← 最大瓶颈
+  - Metal kernel 调用: ~2ms (12%)
+
+**更长 prompt 的瓶颈更明显**（~1500 tokens, 6 chunks）：
+- LMCache 加载: 0.061s
+- 其中 CPU → GPU 传输: ~35ms (57%)
+
+### 10.2 GPU-Side Cache 三层架构
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  L1: GPU Metal Buffer Pool (热 cache)                      │
+│  ├─ 大小: 10GB                                              │
+│  ├─ 位置: GPU 统一内存（M4 Pro Unified Memory）            │
+│  ├─ 特点: 零拷贝访问，Metal kernel 直接读取                │
+│  └─ 策略: LRU eviction                                     │
+├─────────────────────────────────────────────────────────────┤
+│  L2: CPU 内存 (温 cache)                                   │
+│  ├─ 大小: 2GB                                               │
+│  ├─ 特点: 快速访问，但需要 CPU → GPU 传输                  │
+│  └─ 策略: LRU eviction to L3                               │
+├─────────────────────────────────────────────────────────────┤
+│  L3: 磁盘 mmap (冷 cache)                                  │
+│  ├─ 大小: 100GB                                             │
+│  ├─ 特点: 持久化，跨进程共享                                │
+│  └─ 策略: LRU eviction                                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 10.3 数据流优化
+
+#### Prefill Skip 流程（L1 命中）
+
+```
+llama_context
+    ↓
+Check L1 GPU pool (~0.001ms)
+    ↓
+Metal Blit: GPU pool → KV cache (~2ms)
+    ↓
+Skip forward pass
+    ↓
+Done
+
+总计: ~2ms (vs 当前 16ms)
+加速比: 8x
+```
+
+#### Prefill Skip 流程（L1 未命中，warm up）
+
+```
+L2/L3 hit → Read to CPU (~6ms)
+    ↓
+Upload to L1 GPU pool (~8ms)
+    ↓
+Blit to KV cache (~2ms)
+    ↓
+Done (第一次: ~16ms)
+
+下次相同请求:
+L1 hit → Blit (~2ms) ✅
+```
+
+### 10.4 关键技术
+
+#### Metal Buffer Pool
+
+```cpp
+class MetalBufferPool {
+private:
+    id<MTLBuffer> pool_buffer_;          // 10GB pre-allocated
+    std::map<uint64_t, size_t> offset_map_;
+    std::list<uint64_t> lru_list_;
+    const size_t pool_size_ = 10ULL * 1024 * 1024 * 1024;
+
+public:
+    void init(id<MTLDevice> device);
+    size_t store(uint64_t key_hash, const void* k_data, size_t k_size,
+                                     const void* v_data, size_t v_size);
+    size_t get_offset(uint64_t key_hash);
+    void evict_lru();
+};
+```
+
+#### M4 Pro 统一内存优势
+
+- CPU 和 GPU 共享物理内存
+- `MTLResourceStorageModeShared`（零拷贝）
+- CPU 写入，GPU 直接读取
+- **Metal Blit 带宽**: >400 GB/s（vs PCIe 4.0 ~32 GB/s）
+
+### 10.5 性能预测
+
+#### 理论分析
+
+| 场景 | 当前 | GPU-side | 提升 |
+|------|------|----------|------|
+| L1 命中 | 16ms | 2ms | 8x |
+| L1 未命中（首次） | 16ms | 16ms | 1x |
+| L1 未命中（第二次） | 16ms | 2ms | 8x (warm up) |
+
+#### 端到端预测
+
+**保守估计**（考虑 generate 时间）：
+- Cold start: 3.761s
+- GPU-side skip: ~0.030s (LMCache 2ms + generate 1 token 14ms + overhead 14ms)
+- **Speedup: ~125x**
+
+**理想场景**（纯 prefill，generate 0 tokens）：
+- Cold start: 0.700s
+- GPU-side skip: ~0.007s
+- **Speedup: ~100x** ✅
+
+### 10.6 实现计划（3 周）
+
+#### Week 1: GPU Buffer Pool 基础框架（Task #14）
+
+**文件**:
+- `src/metal-buffer-pool.h` (新建)
+- `src/metal-buffer-pool.cpp` (新建)
+- `src/thunder-lmcache-storage.{h,cpp}` (添加 L1 support)
+
+**里程碑**:
+- [x] 设计文档完成
+- [ ] 创建 `MetalBufferPool` class
+- [ ] 预分配 10GB shared buffer
+- [ ] 实现 `store()`/`get_offset()` 接口
+- [ ] LRU eviction 逻辑
+- [ ] 单元测试
+
+**预期性能**: 65x → 75x
+
+#### Week 2: Metal Kernel 集成（Task #15）
+
+**文件**:
+- `src/llama-context.cpp` (修改 prefill skip 逻辑)
+- `ggml/src/ggml-metal/ggml-metal-ops.cpp` (Metal blit)
+
+**里程碑**:
+- [ ] Prefill skip 使用 GPU pool
+- [ ] Metal blit encoder 集成
+- [ ] Benchmark 对比 CPU-side cache
+- [ ] Metal GPU profiler 性能分析
+
+**预期性能**: 75x → 85x
+
+#### Week 3: LRU 策略和最终优化（Task #16）
+
+**文件**:
+- `src/metal-buffer-pool.cpp` (优化 LRU)
+- `src/thunder-lmcache-storage.cpp` (L1 ↔ L2/L3 promotion)
+
+**里程碑**:
+- [ ] GPU pool 满时，evict to L2
+- [ ] L2/L3 热 chunk promote to L1
+- [ ] 多 slot 并发测试（4 slots）
+- [ ] 端到端 benchmark（90-100x 目标）
+
+**预期性能**: 85x → **90-100x** ✨
+
+### 10.7 风险与缓解
+
+| 风险 | 概率 | 影响 | 缓解措施 |
+|------|------|------|----------|
+| GPU 内存不足（10GB pool + 模型 17GB） | 中 | 高 | LRU + disk fallback |
+| Metal API 复杂度 | 中 | 中 | 参考 ggml-metal.cpp |
+| 多 slot 冲突 | 低 | 中 | Buffer pool 并发设计 |
+| 统一内存限制（M4 Pro 48GB） | 低 | 高 | 动态调整 pool size |
+
+### 10.8 验证计划
+
+**单元测试**:
+- [ ] `MetalBufferPool` 分配/释放
+- [ ] LRU eviction 正确性
+- [ ] 多线程并发
+
+**集成测试**:
+- [ ] Prefill skip 使用 GPU pool
+- [ ] L1/L2/L3 三层 promotion
+- [ ] 多 slot 并发
+
+**性能测试**:
+- [ ] Benchmark: L1 vs L2/L3
+- [ ] 端到端 speedup（目标 90-100x）
+- [ ] Metal GPU profiler 分析
+
+### 10.9 技术文档
+
+- **详细设计**: `docs/GPU-SIDE-CACHE-DESIGN.md`
+- **性能基准**: 将更新到 `thunderllama.conf` 注释
+- **测试脚本**: `/tmp/test-gpu-cache.py`（待创建）
+
+---
+
+*ThunderLLAMA Architecture Design Document v1.1*
 *Created: 2026-03-15*
+*Updated: 2026-03-14 (GPU-Side Cache 章节)*
 *Source: Migrated from STATE.md*

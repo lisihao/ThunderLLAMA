@@ -46,6 +46,36 @@ DYLD_LIBRARY_PATH=./build/bin ./build/bin/test-kv-quantize-pipeline
 - 📖 [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
 - 🚀 [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
 
+### 🎯 GPU-Side Cache (IN DEVELOPMENT - Target: 90-100x speedup)
+
+**Eliminating CPU→GPU transfer bottleneck** for LMCache prefill skip:
+
+- 🎯 **Target Performance**: 90-100x prefill skip speedup (vs current 65x)
+- ⚡ **L1 GPU Buffer Pool** - 10GB Metal buffer on unified memory
+- 🚀 **Zero-Copy Access** - Metal kernels directly read from GPU pool
+- 📊 **Three-Tier Cache** - L1 (GPU 10GB) → L2 (CPU 2GB) → L3 (Disk 100GB)
+
+**Current Bottleneck** (~800 tokens):
+```
+Disk read: ~6ms + CPU→GPU: ~8ms + Metal: ~2ms = 16ms total
+                             ↑ 50% bottleneck
+```
+
+**GPU-Side Cache** (L1 hit):
+```
+GPU blit: ~2ms = 2ms total
+Speedup: 8x faster (16ms → 2ms)
+```
+
+**Timeline**:
+- Week 1: GPU Buffer Pool framework (Task #14)
+- Week 2: Metal kernel integration (Task #15)
+- Week 3: LRU strategy + final optimization (Task #16)
+
+**Documentation**:
+- 📖 [GPU-Side Cache Design](docs/GPU-SIDE-CACHE-DESIGN.md)
+- 📊 [Architecture Design - Section 10](docs/architecture-design.md#10-gpu-side-cache-架构2026-03-14)
+
 ### Other ThunderLLAMA Features
 
 - **LMCache Integration** - Content-based KV cache reuse (256-token chunks)
