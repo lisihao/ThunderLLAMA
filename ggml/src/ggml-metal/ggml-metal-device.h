@@ -248,6 +248,7 @@ void * ggml_metal_device_get_obj  (ggml_metal_device_t dev); // id<MTLDevice>
 void * ggml_metal_device_get_queue(ggml_metal_device_t dev); // id<MTLCommandQueue>
 
 ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev);
+void * ggml_metal_library_get_obj(ggml_metal_library_t lib); // id<MTLLibrary>
 
 void ggml_metal_device_rsets_add(ggml_metal_device_t dev, ggml_metal_rset_t rset);
 void ggml_metal_device_rsets_rm (ggml_metal_device_t dev, ggml_metal_rset_t rset);

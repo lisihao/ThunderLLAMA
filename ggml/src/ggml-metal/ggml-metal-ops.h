@@ -91,6 +91,60 @@ int ggml_metal_op_opt_step_sgd      (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_count_equal       (ggml_metal_op_t ctx, int idx);
 int ggml_metal_op_topk_moe          (ggml_metal_op_t ctx, int idx);
 
+// ThunderLLAMA KV Cache Quantization API
+// Group-wise INT8 quantization (对标 MLX mx.quantize)
+void ggml_metal_quantize_kv_cache_q8(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales (1 per group)
+        int          ne00,     // Total elements
+        int          group_size); // Group size (default 64)
+
+void ggml_metal_dequantize_kv_cache_q8(
+        ggml_metal_device_t dev,
+        const void * src,      // INT8 input
+        const void * scales,   // FP16 scales
+        void       * dst,      // FP16 output
+        int          ne00,
+        int          group_size);
+
+// High-performance version (v2) with threadgroup memory
+void ggml_metal_quantize_kv_cache_q8_v2(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales (1 per group)
+        int          ne00,     // Total elements
+        int          group_size); // Group size (default 64)
+
+// Batch quantization (方案 B: reduce kernel launch overhead)
+void ggml_metal_quantize_kv_cache_q8_batch(
+        ggml_metal_device_t dev,
+        const void * src,      // FP16 input (all layers concatenated)
+        void       * dst,      // INT8 output
+        void       * scales,   // FP16 scales
+        int          total_elements,  // Total elements across all layers
+        int          group_size);
+
+void ggml_metal_dequantize_kv_cache_q8_batch(
+        ggml_metal_device_t dev,
+        const void * src,      // INT8 input
+        const void * scales,   // FP16 scales
+        void       * dst,      // FP16 output
+        int          total_elements,
+        int          group_size);
+
+// Offline quantization helper (方案 C: quantize once, use many times)
+// Quantizes existing KV cache in-place or to separate buffer
+void ggml_metal_kv_cache_quantize_offline(
+        ggml_metal_device_t dev,
+        void       * kv_cache,     // Input: FP16 KV cache, Output: quantized metadata
+        int          n_layers,     // Number of layers
+        int          hidden_dim,   // Hidden dimension per layer
+        int          seq_len,      // Sequence length
+        int          group_size);  // Group size (default 64)
+
 #ifdef __cplusplus
 }
 #endif

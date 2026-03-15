@@ -16,12 +16,12 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 ## Tier A: 高回报、可行性高（推荐优先做）
 | # | 优化方案 | 预估提升 | 难度 | 状态 |
 |---|---------|---------|------|------|
-| A1 | Fused Expert Aggregation (7×ADD → 1 kernel) | +3-5% TG | 中 | ⏳ 待做 |
+| A1 | Fused Expert Aggregation (7×ADD → 1 kernel) | +7.3% TG (实测) | 中 | ✅ 已有 (upstream) |
 | A2 | Q5_K Branchless Dequant (select() 替代 ternary) | +2-5% TG | 低 | ⏳ 待做 |
 | A3 | MoE ne21_mm_id_min 阈值降低 (128→8) | +5-15% (多并发) | 低 | ⏳ 待做 |
 | A4 | Fused RMS_NORM+MUL+SWIGLU (PR #16143) | +5-10% | 中 | ⏳ 待做 |
 
-**Tier A 累计预估**: +10-20% → Q5_K 72-78 tok/s
+**Tier A 剩余预估**: A1 已在当前基线中生效（+7.3% 已包含在 65 tok/s 里），A2/A3/A4 预估额外 +5-12% → Q5_K 68-73 tok/s
 
 ## Tier B: 中等回报、技术挑战大
 | # | 优化方案 | 预估提升 | 难度 | 状态 |
@@ -53,6 +53,7 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 | I2 | Grafana 仪表板 | ⏳ 待做 |
 
 # Decisions
+- [2026-03-15] A1 验证: Metal 后端 ADD 链融合已覆盖 MoE 聚合的 7×ADD，无需额外实现。实测 TG +7.3% (59.57 vs 55.50 tok/s)。每层每次 eval 都确认 "fuse: ADD x 7"
 - [2026-03-15] MoE Fusion 只融合 gating 链 (SOFT_MAX→ARGSORT→GET_ROWS)，不融合 normalization chain：graph scheduler 将 MUL_MAT_ID 插在 GET_ROWS 和 SUM_ROWS 之间，无法相邻融合
 - [2026-03-15] METAL_FUSION 配置项加入 thunderllama.conf：通过 GGML_METAL_FUSION_DISABLE 环境变量控制
 - [2026-03-14] N_R0_Q5_K=8 编译时常量：7 组实测确认甜区
@@ -62,6 +63,11 @@ ThunderLLAMA Metal GPU 深度优化 — Tier A/B 内核融合与 GEMV 加速 (Q5
 # Progress
 
 ## Done
+- ✅ A1 Fused Expert Aggregation 验证 (build 8389)
+  - Metal 后端 ADD 链融合 (kernel_bin_fuse_impl) 已自动覆盖 MoE 7×ADD
+  - GGML_METAL_FUSION_DEBUG=2 确认：每层每 eval 均 "fuse: ADD x 7"
+  - 实测: TG +7.3% (59.57 vs 55.50 tok/s), PP +0.8% (675 vs 670)
+  - 结论: 无需额外代码，upstream 基础设施已完全覆盖
 - ✅ Metal MoE Kernel Fusion 实现 (build 8389)
   - kernel_topk_moe_f32: simdgroup softmax + iterative top-8 argmax
   - 3-op fusion: SOFT_MAX → ARGSORT → GET_ROWS

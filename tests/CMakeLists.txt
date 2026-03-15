@@ -287,3 +287,24 @@ target_include_directories(test-alloc PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
 
 llama_build(export-graph-ops.cpp)
 target_include_directories(export-graph-ops PRIVATE ${PROJECT_SOURCE_DIR}/ggml/src)
+
+# ThunderLLAMA KV Cache 量化测试
+llama_build(test-kv-quantize.cpp)
+target_link_libraries(test-kv-quantize PRIVATE ggml-metal)
+target_include_directories(test-kv-quantize PRIVATE
+    ${PROJECT_SOURCE_DIR}/ggml/src
+    ${PROJECT_SOURCE_DIR}/ggml/src/ggml-metal)
+
+# ThunderLLAMA KV Cache 量化性能分析
+llama_build(test-kv-quantize-profiling.cpp)
+target_link_libraries(test-kv-quantize-profiling PRIVATE ggml-metal)
+target_include_directories(test-kv-quantize-profiling PRIVATE
+    ${PROJECT_SOURCE_DIR}/ggml/src
+    ${PROJECT_SOURCE_DIR}/ggml/src/ggml-metal)
+
+# ThunderLLAMA KV Cache 量化测试 (v2 - 高性能版本)
+llama_build(test-kv-quantize-v2.cpp)
+target_link_libraries(test-kv-quantize-v2 PRIVATE ggml-metal)
+target_include_directories(test-kv-quantize-v2 PRIVATE
+    ${PROJECT_SOURCE_DIR}/ggml/src
+    ${PROJECT_SOURCE_DIR}/ggml/src/ggml-metal)

@@ -894,6 +894,10 @@ ggml_metal_library_t ggml_metal_device_get_library(ggml_metal_device_t dev) {
     return dev->library;
 }
 
+void * ggml_metal_library_get_obj(ggml_metal_library_t lib) {
+    return lib->obj;
+}
+
 void ggml_metal_device_rsets_add(ggml_metal_device_t dev, ggml_metal_rset_t rset) {
     if (rset == nil) {
         return;

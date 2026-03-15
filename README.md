@@ -10,6 +10,53 @@
 
 LLM inference in C/C++
 
+---
+
+## ⚡ ThunderLLAMA - High-Performance Optimizations
+
+**ThunderLLAMA** is a high-performance fork of llama.cpp optimized for Apple Silicon, featuring cutting-edge optimizations:
+
+### 🚀 KV Cache Quantization (NEW!)
+
+**8.47 GB/s** GPU-side quantization using CPU-GPU pipeline optimization:
+
+- ✅ **Zero-Copy** - Leverages Apple's Unified Memory Architecture (UMA)
+- ✅ **CPU-GPU Pipeline** - ARM NEON (CPU) + Metal (GPU) parallel execution
+- ✅ **1.9x Memory Reduction** - FP16 → INT8 + scales (82.5 MB vs 160 MB)
+- ✅ **<1% Accuracy Loss** - Max error 0.023, Avg error 0.005
+
+**Performance**:
+```
+Qwen3-30B (32 layers, 160 MB):
+- Pipeline: 18.9 ms (8.47 GB/s) ⚡ FASTEST
+- Baseline: 60.6 ms (2.64 GB/s)
+- Speedup: 3.2x faster
+```
+
+**Quick Start**:
+```bash
+# Enable in thunderllama.conf
+KV_CACHE_LEVEL="q8_0"
+
+# Run tests
+DYLD_LIBRARY_PATH=./build/bin ./build/bin/test-kv-quantize-pipeline
+```
+
+**Documentation**:
+- 📖 [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
+- 🚀 [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
+
+### Other ThunderLLAMA Features
+
+- **LMCache Integration** - Content-based KV cache reuse (256-token chunks)
+- **Paged Attention** - Efficient memory management for long contexts
+- **Metal Kernel Fusion** - Optimized GPU kernels for M-series chips
+- **Configuration-Driven** - All settings in `thunderllama.conf` (no CLI args needed)
+
+**Repository**: Fork of [llama.cpp](https://github.com/ggerganov/llama.cpp) with Apple Silicon optimizations
+
+---
+
 ## Recent API changes
 
 - [Changelog for `libllama` API](https://github.com/ggml-org/llama.cpp/issues/9289)

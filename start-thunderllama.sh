@@ -110,74 +110,11 @@ echo "✅ THUNDERLLAMA_CHUNK_PREFILL=$THUNDERLLAMA_CHUNK_PREFILL"
 echo ""
 echo "=== 构建启动命令 ==="
 
+# ThunderLLAMA 只从 thunderllama.conf 读取配置
+# 不接受命令行参数（已在 server.cpp 中禁用）
 CMD="$SCRIPT_DIR/build/bin/llama-server"
-CMD="$CMD -m $MODEL_PATH_EXPANDED"
-CMD="$CMD -c $CONTEXT_SIZE"
-CMD="$CMD -ngl $GPU_LAYERS"
-CMD="$CMD --port $SERVER_PORT"
 
-# Flash Attention
-if [ "$FLASH_ATTENTION" != "auto" ]; then
-    CMD="$CMD -fa $FLASH_ATTENTION"
-fi
-
-# Parallel
-if [ -n "$PARALLEL_SLOTS" ] && [ "$PARALLEL_SLOTS" -gt 1 ]; then
-    CMD="$CMD --parallel $PARALLEL_SLOTS"
-fi
-
-# Batch
-if [ -n "$BATCH_SIZE" ]; then
-    CMD="$CMD -b $BATCH_SIZE"
-fi
-if [ -n "$UBATCH_SIZE" ]; then
-    CMD="$CMD -ub $UBATCH_SIZE"
-fi
-
-# Cache
-if [ -n "$CACHE_REUSE" ] && [ "$CACHE_REUSE" -gt 0 ]; then
-    CMD="$CMD --cache-reuse $CACHE_REUSE"
-fi
-if [ -n "$CACHE_RAM" ]; then
-    CMD="$CMD --cache-ram $CACHE_RAM"
-fi
-if [ "$KV_UNIFIED" = "1" ]; then
-    CMD="$CMD --kv-unified"
-fi
-
-# Continuous Batching
-if [ "$CONT_BATCHING" = "1" ]; then
-    CMD="$CMD --cont-batching"
-fi
-if [ -n "$PRIO_BATCH" ] && [ "$PRIO_BATCH" -gt 0 ]; then
-    CMD="$CMD --prio-batch $PRIO_BATCH"
-fi
-
-# CPU
-if [ -n "$CPU_THREADS" ]; then
-    CMD="$CMD --threads $CPU_THREADS"
-fi
-if [ -n "$CPU_THREADS_BATCH" ]; then
-    CMD="$CMD --threads-batch $CPU_THREADS_BATCH"
-fi
-if [ -n "$CPU_MASK" ]; then
-    CMD="$CMD --cpu-mask $CPU_MASK"
-fi
-if [ -n "$PROCESS_PRIORITY" ] && [ "$PROCESS_PRIORITY" -gt 0 ]; then
-    CMD="$CMD --prio $PROCESS_PRIORITY"
-fi
-
-# Metal
-if [ "$NO_HOST" = "1" ]; then
-    CMD="$CMD --no-host"
-fi
-
-# Auto-fit
-if [ "$AUTO_FIT" = "1" ]; then
-    CMD="$CMD --fit on"
-fi
-
-# 日志
+# 日志重定向
 if [ -n "$LOG_FILE" ]; then
     CMD="$CMD > $LOG_FILE 2>&1 &"
 else
@@ -186,6 +123,8 @@ fi
 
 echo "启动命令:"
 echo "$CMD"
+echo ""
+echo "注意: 所有参数从 thunderllama.conf 读取，不使用命令行参数"
 
 # ============================================================================
 # 启动服务器
