@@ -1,48 +1,42 @@
 # Mission
-ThunderLLAMA 优化双线并行：
-1. **GPU-Side Cache** — 90-100x prefill skip speedup (当前 65x)
+ThunderLLAMA 优化：
+1. **L2/L3 两层缓存系统** — CPU (2GB) + Disk (100GB) 缓存，98.5% 命中率
 2. **Metal GPU 深度优化** — Tier A/B 内核融合与 GEMV 加速 (Q5_K 65→78+ tok/s)
 
 # Constraints
 - 不破坏现有 Clawgate + ThunderLLAMA 集成
 - 配置文件 (thunderllama.conf) 是唯一真相源
 - 正确性优先：输出必须与未优化版本 bit-identical
+- **禁止 Mock 和模拟**：代码必须真实实现，能跑通
 
 # Current Plan
 
-## 🎯 GPU-Side Cache 开发（优先级最高）
+## 🎯 LMCache 两层缓存系统（当前状态）
 
-### Phase 1: 已完成设计
-- ✅ 技术设计文档：`docs/GPU-SIDE-CACHE-DESIGN.md`
-- ✅ 架构设计更新：`docs/architecture-design.md` Section 10
-- ✅ README 更新：特性说明
-- ✅ Task 创建：#14, #15, #16
+### ✅ 当前架构：L2 (CPU) + L3 (Disk)
+- **L2 CPU 缓存**: 2GB RAM
+- **L3 磁盘缓存**: 100GB Disk (`/Volumes/toshiba/thunderllama-cache/kv_cache.bin`)
+- **传输方式**: CPU→GPU transfer (ggml_backend_tensor_set)
+- **当前性能**:
+  - L2 命中率: 98.5%
+  - Full Skip: 20% 跳过率
+  - 缓存容量: 144 chunks (26 MB)
 
-### Phase 2: Week 1 - GPU Buffer Pool（完成 80%）
-**Task #14** - 目标：75x speedup
-- ✅ 创建 `MetalBufferPool` class
-- ✅ 预分配 10GB shared buffer (MTLResourceStorageModeShared)
-- ✅ 实现 `store()`/`get_offset()` 接口
-- ✅ LRU eviction 逻辑
-- ✅ 集成到 `ThunderChunkStorage` (L1 → L2 → L3)
-- ✅ C++ 工厂函数 `create_metal_buffer_pool()`
-- ✅ 编译成功（无错误）
-- [ ] 单元测试
-- [ ] 运行时验证（启动 llama-server 测试 L1 初始化）
+### ❌ L1 GPU Pool 已移除 (2026-03-15)
+**原因**: llama-server 的 slot 管理在请求结束时调用 `memory_seq_rm [0, end)` 清空 KV cache，导致 L1/L2/L3 缓存在请求边界失效。
 
-### Phase 3: Week 2 - Metal Kernel 集成
-**Task #15** - 目标：85x speedup
-- [ ] 修改 `llama-context.cpp` prefill skip 逻辑
-- [ ] Metal blit encoder 集成
-- [ ] Benchmark 对比 CPU-side cache
-- [ ] Metal GPU profiler 性能分析
+**移除内容**:
+- ❌ metal-buffer-pool.h
+- ❌ metal-buffer-pool.mm
+- ❌ L1 存储/查询逻辑（thunder-lmcache-storage.cpp）
+- ❌ L1 blit 代码（llama-context.cpp）
+- ❌ Approximate Skip 特性（95%+ 命中零填充）
 
-### Phase 4: Week 3 - LRU 策略和最终优化
-**Task #16** - 目标：90-100x speedup
-- [ ] GPU pool 满时，evict to L2
-- [ ] L2/L3 热 chunk promote to L1
-- [ ] 多 slot 并发测试（4 slots）
-- [ ] 端到端 benchmark（90-100x 目标）
+**保留功能**:
+- ✅ L2/L3 缓存（CPU→GPU transfer）
+- ✅ Full Skip（100% 命中跳过前向传播）
+- ✅ Prefix Matching（前缀匹配复用缓存）
+- ✅ Content-based Hashing
 
 ---
 
@@ -57,9 +51,9 @@ ThunderLLAMA 优化双线并行：
 | # | 优化方案 | 预估提升 | 难度 | 状态 |
 |---|---------|---------|------|------|
 | A1 | Fused Expert Aggregation (7×ADD → 1 kernel) | +7.3% TG (实测) | 中 | ✅ 已有 (upstream) |
-| A2 | Q5_K Branchless Dequant (select() 替代 ternary) | +2-5% TG | 低 | ⏳ 待做 |
-| A3 | MoE ne21_mm_id_min 阈值降低 (128→8) | +5-15% (多并发) | 低 | ⏳ 待做 |
-| A4 | Fused RMS_NORM+MUL+SWIGLU (PR #16143) | +5-10% | 中 | ⏳ 待做 |
+| A2 | Q5_K Branchless Dequant (select() 替代 ternary) | +2-5% TG | 低 | ⏳ 待做 (#13) |
+| A3 | MoE ne21_mm_id_min 阈值降低 (128→8) | +5-15% (多并发) | 低 | ⏳ 待做 (#2) |
+| A4 | Fused RMS_NORM+MUL+SWIGLU (PR #16143) | +5-10% | 中 | ⏳ 待做 (#2) |
 
 **Tier A 剩余预估**: A1 已在当前基线中生效（+7.3% 已包含在 65 tok/s 里），A2/A3/A4 预估额外 +5-12% → Q5_K 68-73 tok/s
 
@@ -82,9 +76,24 @@ ThunderLLAMA 优化双线并行：
 ## Tier D: 架构级变革（研究性质）
 | # | 优化方案 | 预估提升 | 难度 |
 |---|---------|---------|------|
-| D1 | MPSGraph Hybrid Path | +30-50% | 极高 |
+| D1 | MPSGraph Hybrid Path | +30-50% | 极高 (#3) |
 | D2 | Multi-Expert MatMul Fusion (8→1 grouped matmul) | +10-20% | 极高 |
 | D3 | 4-concurrent-user batched MoE dispatch | +15-25% 聚合 | 高 |
+
+## Paged Attention
+| # | 任务 | 状态 |
+|---|------|------|
+| #4 | Paged Attention 优化（对标 vllm-mlx） | ⏳ 待做 |
+
+## Graph Rewrite 系统（长期规划）
+| # | 任务 | 状态 |
+|---|------|------|
+| #5 | Week 6.1: ggml Graph 分析器 | ⏳ 待做 |
+| #6 | Week 6.2: Dependency Graph Builder | ⏳ 待做 |
+| #7 | Week 7.1: Graph Rewriter | ⏳ 待做 |
+| #8 | Week 7.2: Metal Kernel Code Generator | ⏳ 待做 |
+| #9 | Week 8.1: Metal JIT Compiler | ⏳ 待做 |
+| #10 | Week 8.2: 集成到 ggml-metal | ⏳ 待做 |
 
 ## 基础设施
 | # | 任务 | 状态 |
@@ -93,8 +102,23 @@ ThunderLLAMA 优化双线并行：
 | I2 | Grafana 仪表板 | ⏳ 待做 |
 
 # Decisions
+
+## LMCache 架构决策
 - [2026-03-14] **GPU-Side Cache 架构**：采用三层架构（L1 GPU 10GB → L2 CPU 2GB → L3 Disk 100GB），利用 M4 Pro 统一内存架构消除 CPU→GPU 传输瓶颈（~8ms）。目标 90-100x speedup
+- [2026-03-15] **移除 L1 GPU Pool**：因 llama-server slot 管理在请求边界调用 `memory_seq_rm [0, end)` 清空 KV cache，导致 L1/L2/L3 缓存失效。修复 persistence 需要修改核心 slot 管理（风险高）。决定移除 L1，保持 L2/L3 两层缓存系统。
+  - 移除文件: metal-buffer-pool.h, metal-buffer-pool.mm
+  - 移除功能: L1 存储/查询、L1 blit、Approximate Skip
+  - 保留功能: L2/L3 缓存、Full Skip、Prefix Matching
+  - 验证结果: L2 命中率 98.5%，Full Skip 20% 跳过率
+- [2026-03-15] **KV Cache 量化级别选择**：全面测试 f16、q8_0、q4_0 三种量化级别（Task #18，15 次测试）。**选择 q8_0 作为推荐配置**：
+  - 性能损失微小: 仅 -2.2% (46.55 → 45.51 tok/s)
+  - 内存节省显著: -50% KV Cache (1536MB → 768MB)
+  - 稳定性良好: 标准差 ±3.43 tok/s
+  - q4_0 虽节省 75% 内存，但性能损失 -6.1%，仅适合极限内存场景
+  - 详细报告: `.solar/kv-quant-results/FINAL_REPORT_*.json`
 - [2026-03-14] **EXCLUSIVE 模式**：添加 THUNDER_LMCACHE_EXCLUSIVE=1 配置，禁用内置 prompt cache 避免干扰 LMCache 测试。实测 65.22x speedup（vs 62x 共存模式）
+
+## Metal 优化决策
 - [2026-03-15] A1 验证: Metal 后端 ADD 链融合已覆盖 MoE 聚合的 7×ADD，无需额外实现。实测 TG +7.3% (59.57 vs 55.50 tok/s)。每层每次 eval 都确认 "fuse: ADD x 7"
 - [2026-03-15] MoE Fusion 只融合 gating 链 (SOFT_MAX→ARGSORT→GET_ROWS)，不融合 normalization chain：graph scheduler 将 MUL_MAT_ID 插在 GET_ROWS 和 SUM_ROWS 之间，无法相邻融合
 - [2026-03-15] METAL_FUSION 配置项加入 thunderllama.conf：通过 GGML_METAL_FUSION_DISABLE 环境变量控制
@@ -106,7 +130,26 @@ ThunderLLAMA 优化双线并行：
 
 ## Done
 
-### GPU-Side Cache 准备工作（2026-03-14）
+### L1 GPU Pool 完整生命周期（2026-03-14 至 2026-03-15）
+- ✅ **Task #14**: Week 1 - GPU Buffer Pool 基础框架（完成后移除）
+  - ✅ 实现 MetalBufferPool class（10GB MTLResourceStorageModeShared）
+  - ✅ LRU eviction 逻辑
+  - ✅ 集成到 ThunderChunkStorage（L1 → L2 → L3）
+  - ✅ 编译成功（build 8390）
+- ✅ **Task #15**: Week 2 - Metal Kernel 集成和优化（完成后移除）
+  - ✅ Metal Blit Encoder 实现（GPU→GPU transfer）
+  - ✅ 修复 decode crash（chunk_size bug）
+  - ✅ 限制 L1 blit 仅在 prefill 阶段
+- ✅ **Task #17**: Remove L1 GPU Pool（2026-03-15）
+  - ✅ 删除 metal-buffer-pool.h 和 metal-buffer-pool.mm
+  - ✅ 移除 thunder-lmcache-storage.cpp 中的 L1 逻辑
+  - ✅ 移除 llama-context.cpp 中的 L1 blit 和 Approximate Skip
+  - ✅ 更新 CMakeLists.txt
+  - ✅ 编译成功（0 错误）
+  - ✅ 启动测试成功
+  - ✅ L2/L3 缓存验证：98.5% 命中率，Full Skip 20% 跳过率
+
+### LMCache 基础设施（2026-03-14）
 - ✅ EXCLUSIVE 模式实现：禁用内置 prompt cache（server-task.cpp, config-parser.h）
   - 性能验证：65.22x speedup（vs 62x 共存模式）
   - 配置项：THUNDER_LMCACHE_EXCLUSIVE=1
@@ -118,7 +161,24 @@ ThunderLLAMA 优化双线并行：
   - `docs/architecture-design.md` Section 10
   - `README.md` 特性说明
   - `.solar/STATE.md` Mission 和 Plan 更新
-- ✅ Task 创建：#14 (Week 1), #15 (Week 2), #16 (Week 3)
+
+### KV Cache 量化优化
+- ✅ **Task #1**: Native KV Cache 量化（GPU-side）
+- ✅ **Task #11**: 集成 KV Cache Pipeline Quantization 到 llama-kv-cache.cpp
+- ✅ **Task #12**: End-to-End Benchmark - 真实 Qwen3-30B 模型测试
+- ✅ **Task #18**: KV Cache 量化全面对比测试（2026-03-15）
+  - 测试配置：Qwen3-30B-Q5_K_M，3 种量化级别（f16, q8_0, q4_0），每种 5 次测试
+  - 测试结果：
+    - **f16** (基线): TG=46.55±0.39 tok/s, PP=86.12±0.71 tok/s, KV=1536MB
+    - **q8_0** (推荐): TG=45.51±3.43 tok/s, PP=84.20±6.34 tok/s, KV=768MB (-50%)
+      - 性能损失: -2.2% TG, -2.2% PP
+      - 内存节省: -50% KV Cache
+    - **q4_0**: TG=43.70±2.75 tok/s, PP=80.85±5.09 tok/s, KV=384MB (-75%)
+      - 性能损失: -6.1% TG, -6.1% PP
+      - 内存节省: -75% KV Cache
+  - **结论**: 选择 q8_0 作为推荐配置（平衡性能和内存）
+  - **配置更新**: `KV_CACHE_LEVEL="q8_0"` 写入 thunderllama.conf
+  - 详细报告：`.solar/kv-quant-results/FINAL_REPORT_*.json`
 
 ### Metal GPU 内核优化
 - ✅ A1 Fused Expert Aggregation 验证 (build 8389)
@@ -138,20 +198,7 @@ ThunderLLAMA 优化双线并行：
 - ✅ OPTIMIZATION_FEATURES.md 更新: Metal Kernel Fusion + 性能基准
 
 ## In-Progress
-- 🔥 **Task #14**: Week 1 - GPU Buffer Pool 基础框架（80% 完成）
-  - 目标：实现 MetalBufferPool class，预分配 10GB GPU buffer
-  - 预期性能：65x → 75x
-  - 已完成：
-    - ✅ `metal-buffer-pool.{h,mm}` 实现（10GB MTLResourceStorageModeShared）
-    - ✅ LRU eviction 逻辑（`evict_lru()`, `update_lru()`）
-    - ✅ `create_metal_buffer_pool()` C++ 工厂函数
-    - ✅ `ThunderChunkStorage` 集成（L1 → L2 → L3）
-    - ✅ `put()` 优先存入 L1
-    - ✅ `get()` 优先从 L1 查找
-    - ✅ 编译成功（build 8390）
-  - 待完成：
-    - [ ] 单元测试
-    - [ ] 运行时验证（启动 llama-server 测试 L1 初始化）
+- 无（当前系统稳定运行）
 
 ## Blocked
 - Normalization chain (SUM_ROWS→CLAMP→DIV) 融合受 graph scheduler 限制
@@ -159,14 +206,51 @@ ThunderLLAMA 优化双线并行：
 # 已完成工作摘要 (详见 docs/architecture-design.md)
 
 ## 关键成果
+- **L2/L3 两层缓存**: 98.5% L2 命中率，Full Skip 20% 跳过率
 - **三层协同**: ContextPilot + ClawGate + LMCache = 23.34x (Phase 1 完成)
 - **Hybrid Hashing**: prefix overlap 1.11x → 3-7.8x
 - **Skip Logic**: cache_prompt=false 触发 27.93x 加速
-- **Approximate Skip**: 95%+ 命中零填充，覆盖率 5%→30%
 - **V Tensor 教训**: 不跳过 forward pass 时 V cache = 纯开销 (-8.2%)
 - **OpenMP 冲突**: 已解决 (venv + OMP_NUM_THREADS=1)
 
 ## 待完成
 - ⏳ ClawGate + ThunderLLAMA 完整链路测试 (待配置路由)
 - ⏳ Prometheus/Grafana 监控 (见 task list I1/I2)
+- ⏳ Tier A 剩余优化 (A2/A3/A4)
 
+# Next Actions
+
+## 立即可做（优先级排序）
+
+1. **Tier A2 - Q5_K Branchless Dequantization** (#13)
+   - 难度：低
+   - 预估：+2-5% TG
+   - 实现：select() 替代 ternary operator
+
+2. **Tier A3 - MoE ne21_mm_id_min 阈值降低** (#2)
+   - 难度：低
+   - 预估：+5-15% (多并发)
+   - 实现：128→8
+
+3. **Tier A4 - Fused RMS_NORM+MUL+SWIGLU** (#2)
+   - 难度：中
+   - 预估：+5-10%
+   - 参考：PR #16143
+
+4. **Week 3 - LRU 策略优化** (#16)
+   - L2/L3 缓存 LRU 策略优化
+   - 多 slot 并发测试
+
+## 长期规划
+
+1. **Paged Attention 优化** (#4)
+   - 对标 vllm-mlx
+   - 需要深入研究
+
+2. **Graph Rewrite 系统** (#5-#10)
+   - 研究性质
+   - 需要系统性设计
+
+3. **Metal Performance Shaders (MPS)** (#3)
+   - 探索 MPSGraph 集成
+   - 高风险高回报

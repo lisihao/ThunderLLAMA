@@ -1,0 +1,15 @@
+{
+  "quant_level": "q4_0",
+  "run_num": 3,
+  "timestamp": "2026-03-15T01:06:59-04:00",
+  "elapsed_time": 2.470319,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 40.4806018979735,
+  "pp_speed": 74.88911351125098,
+  "kv_cache_size": "1536.00 MiB",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": " 薛定谔方程是量子力学的核心方程之一，用于描述量子系统随时间演化的行为。它由奥地利物理学家埃尔温·薛定谔于1926年提出，是量子力学中用于预测微观粒子（如电子、光子等）运动状态的基本工具。薛定谔方程可以分为两种形式：薛定谔方程的物理意义。 薓 ...\r\n ...\r\n ...\r\n ...\r\n ...\r\n ...\n\n ...\n\n ...\n\n ...\n\n ...\n\n ...\n\n ...\n\n ...\n\n ...\n",
+  "perf_source": "calculated"
+}

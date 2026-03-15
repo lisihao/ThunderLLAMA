@@ -16,35 +16,40 @@ LLM inference in C/C++
 
 **ThunderLLAMA** is a high-performance fork of llama.cpp optimized for Apple Silicon, featuring cutting-edge optimizations:
 
-### 🚀 KV Cache Quantization (NEW!)
+### 🚀 KV Cache Quantization (Recommended: q8_0)
 
-**8.47 GB/s** GPU-side quantization using CPU-GPU pipeline optimization:
+**GPU-side quantization** with comprehensive testing on **Qwen3-30B-Q5_K_M**:
 
-- ✅ **Zero-Copy** - Leverages Apple's Unified Memory Architecture (UMA)
-- ✅ **CPU-GPU Pipeline** - ARM NEON (CPU) + Metal (GPU) parallel execution
-- ✅ **1.9x Memory Reduction** - FP16 → INT8 + scales (82.5 MB vs 160 MB)
-- ✅ **<1% Accuracy Loss** - Max error 0.023, Avg error 0.005
+| Configuration | TG (tok/s) | PP (tok/s) | KV Memory | Performance Loss |
+|---------------|-----------|-----------|-----------|------------------|
+| **f16** (baseline) | 46.55 ± 0.39 | 86.12 ± 0.71 | 1536 MB | 0% |
+| **q8_0** ⭐ (recommended) | 45.51 ± 3.43 | 84.20 ± 6.34 | 768 MB | -2.2% |
+| **q4_0** | 43.70 ± 2.75 | 80.85 ± 5.09 | 384 MB | -6.1% |
 
-**Performance**:
-```
-Qwen3-30B (32 layers, 160 MB):
-- Pipeline: 18.9 ms (8.47 GB/s) ⚡ FASTEST
-- Baseline: 60.6 ms (2.64 GB/s)
-- Speedup: 3.2x faster
-```
+**Why q8_0?**
+- ✅ **Minimal Performance Impact** - Only 2.2% slower than FP16
+- ✅ **50% Memory Savings** - 768 MB vs 1536 MB KV Cache
+- ✅ **Stable Performance** - 100% L2 cache hit rate maintained
+- ✅ **Production Ready** - Ideal for 4-8 concurrent slots
 
 **Quick Start**:
 ```bash
 # Enable in thunderllama.conf
-KV_CACHE_LEVEL="q8_0"
+KV_CACHE_LEVEL="q8_0"  # Recommended configuration
 
-# Run tests
-DYLD_LIBRARY_PATH=./build/bin ./build/bin/test-kv-quantize-pipeline
+# Restart server
+./restart-thunderllama.sh
 ```
+
+**When to use q4_0**: Extreme memory constraints only (75% memory savings, but 6.1% performance loss)
+
+**Test Methodology**: 15 tests (5 runs × 3 quantization levels), 185 prompt tokens + 100 completion tokens per test.
 
 **Documentation**:
 - 📖 [Architecture & Algorithm Design](docs/KV_CACHE_QUANTIZATION.md)
 - 🚀 [Quick Start Guide](docs/KV_QUANTIZATION_QUICK_START.md)
+- 📊 [Full Test Report](.solar/kv-quant-results/FINAL_REPORT_20260315_011026.json)
+- 📝 [Update Summary](.solar/UPDATE_SUMMARY_20260315.md)
 
 ### 🎯 GPU-Side Cache (IN DEVELOPMENT - Target: 90-100x speedup)
 

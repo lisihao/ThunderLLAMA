@@ -1,0 +1,15 @@
+{
+  "quant_level": "f16",
+  "run_num": 1,
+  "timestamp": "2026-03-15T01:01:03-04:00",
+  "elapsed_time": 2.135138,
+  "prompt_tokens": 185,
+  "completion_tokens": 100,
+  "tg_speed": 46.83538019556581,
+  "pp_speed": 86.64545336179675,
+  "kv_cache_size": "",
+  "l2_hit_rate": 1.0,
+  "l2_chunks": 144,
+  "output_text": "薛定谔方程是量子力学的基本方程，描述了量子系统随时间演化的行为。薛定谔方程的数学形式是：iℏ∂/∂tψ(r,t) = - (ℏ²/2m)∇²ψ(r,t) + V(r,t)ψ(r,t)。其中，i是虚数单位，ℏ是约化普朗克常数，ψ(r,t)是波函数，m是粒子质量，V(r,t\n",
+  "perf_source": "calculated"
+}
