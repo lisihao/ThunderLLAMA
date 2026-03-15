@@ -626,6 +626,37 @@ void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
     }
 }
 
+bool ThunderChunkStorage::blit_from_l1(const thunder_kv_chunk_key & key,
+                                        void * dst_buffer,
+                                        size_t dst_offset,
+                                        size_t chunk_size) {
+    // Check if L1 is enabled
+    if (!l1_enabled_ || metal_pool_ == nullptr) {
+        return false;  // L1 not available, caller should use fallback
+    }
+
+    uint64_t key_hash = hash_key(key);
+
+    // Try to blit from L1 GPU pool (dst_buffer cast handled inside .mm file)
+    bool success = metal_pool_->blit_to_buffer(key_hash,
+                                                dst_buffer,
+                                                dst_offset,
+                                                chunk_size);
+
+    if (success) {
+        // L1 hit! Update stats
+        std::lock_guard<std::mutex> lock(mutex_);
+        total_hits_++;
+        access_freq_[key_hash]++;
+        total_accesses_++;
+
+        fprintf(stderr, "[ThunderChunkStorage] L1 BLIT: hash=%016llx, dst_offset=%zu, size=%zu\n",
+                (unsigned long long)key_hash, dst_offset, chunk_size);
+    }
+
+    return success;
+}
+
 size_t ThunderChunkStorage::get_cpu_usage_bytes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return l2_usage_bytes_;

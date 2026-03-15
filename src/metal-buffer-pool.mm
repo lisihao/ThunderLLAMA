@@ -166,6 +166,83 @@ bool MetalBufferPool::has(uint64_t key_hash) const {
     return offset_map_.find(key_hash) != offset_map_.end();
 }
 
+bool MetalBufferPool::blit_to_buffer(uint64_t key_hash,
+                                      void* dst_buffer,
+                                      size_t dst_offset,
+                                      size_t chunk_size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (pool_buffer_ == nullptr || dst_buffer == nullptr) {
+        fprintf(stderr, "[MetalBufferPool] ERROR: Invalid buffer in blit_to_buffer\n");
+        return false;
+    }
+
+    // Check if chunk exists
+    auto it = offset_map_.find(key_hash);
+    if (it == offset_map_.end()) {
+        return false;  // Chunk not in L1
+    }
+
+    ChunkMetadata & meta = it->second;
+    size_t src_offset = meta.offset;
+
+    // Verify size matches
+    if (chunk_size > meta.k_size) {
+        fprintf(stderr, "[MetalBufferPool] ERROR: Requested size %zu > cached k_size %zu\n",
+                chunk_size, meta.k_size);
+        return false;
+    }
+
+    @autoreleasepool {
+        id<MTLBuffer> src_buffer = (__bridge id<MTLBuffer>)pool_buffer_;
+        // Perform __bridge cast here (only works in .mm files)
+        id<MTLBuffer> dst_mtl_buffer = (__bridge id<MTLBuffer>)dst_buffer;
+
+        // Get device and create command queue
+        id<MTLDevice> device = [src_buffer device];
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        if (!queue) {
+            fprintf(stderr, "[MetalBufferPool] ERROR: Failed to create command queue\n");
+            return false;
+        }
+
+        // Create command buffer
+        id<MTLCommandBuffer> cmd_buffer = [queue commandBuffer];
+        if (!cmd_buffer) {
+            fprintf(stderr, "[MetalBufferPool] ERROR: Failed to create command buffer\n");
+            return false;
+        }
+
+        // Create blit command encoder
+        id<MTLBlitCommandEncoder> blit_encoder = [cmd_buffer blitCommandEncoder];
+        if (!blit_encoder) {
+            fprintf(stderr, "[MetalBufferPool] ERROR: Failed to create blit encoder\n");
+            return false;
+        }
+
+        // Execute GPU→GPU copy (Metal Blit)
+        [blit_encoder copyFromBuffer:src_buffer
+                        sourceOffset:src_offset
+                            toBuffer:dst_mtl_buffer
+                   destinationOffset:dst_offset
+                                size:chunk_size];
+
+        [blit_encoder endEncoding];
+
+        // Commit and wait
+        [cmd_buffer commit];
+        [cmd_buffer waitUntilCompleted];
+
+        // Update LRU (this chunk was accessed)
+        update_lru(key_hash);
+
+        fprintf(stderr, "[MetalBufferPool] Blit: hash=%016llx, src_offset=%zu, dst_offset=%zu, size=%zu\n",
+                (unsigned long long)key_hash, src_offset, dst_offset, chunk_size);
+
+        return true;
+    }
+}
+
 // ============================================================================
 // Allocation
 // ============================================================================

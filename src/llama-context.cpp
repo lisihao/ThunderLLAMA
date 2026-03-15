@@ -1472,7 +1472,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                                 if (cached && cached->k_data) {
                                     const size_t offset = chunk_start * n_embd_k * element_size;
                                     ggml_backend_tensor_set(k_tensor, cached->k_data, offset, cached->k_size);
-                                    lmcache_chunks_found++;
+                                    // NOTE: Don't increment chunks_found here to avoid double-counting
+                                    // Chunks will be counted in the normal loop below
                                 }
                             }
                         }
@@ -1517,41 +1518,61 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
                         lmcache_chunks_needed++;
 
-                        thunder_kv_chunk * cached = g_lmcache_storage->get(key);
-                        if (il == 0 && chunk_idx == 0 && is_prefill) {
-                            fprintf(stderr, "[DEBUG] Trying to get chunk: layer=%d, chunk_start=%zu, cached=%p\n",
-                                    il, chunk_start, (void*)cached);
-                            fflush(stderr);
+                        // Week 2 Optimization: Try L1 GPU blit first (GPU→GPU ~2ms)
+                        // If L1 miss, fallback to L2/L3 (CPU→GPU ~8ms)
+                        const size_t offset = chunk_start * n_embd_k * element_size;
+                        const size_t chunk_bytes = THUNDER_CHUNK_SIZE * n_embd_k * element_size;
+                        const size_t tensor_bytes = ggml_nbytes(k_tensor);
+
+                        if (offset + chunk_bytes > tensor_bytes) {
+                            continue;
                         }
-                        if (cached && cached->k_data) {
-                            const size_t offset = chunk_start * n_embd_k * element_size;
-                            // Use the actual cached size (handles partial chunks correctly)
-                            const size_t chunk_bytes = cached->k_size;
 
-                            const size_t tensor_bytes = ggml_nbytes(k_tensor);
-                            if (offset + chunk_bytes > tensor_bytes) {
-                                continue;
-                            }
+                        // Get Metal buffer from tensor
+                        void* metal_buffer = ggml_backend_buffer_get_base(k_tensor->buffer);
 
-                            // Restore from cache
-                            ggml_backend_tensor_set(k_tensor, cached->k_data, offset, chunk_bytes);
+                        // Try L1 blit (GPU→GPU, ~2ms)
+                        bool l1_hit = g_lmcache_storage->blit_from_l1(key, metal_buffer, offset, chunk_bytes);
+
+                        if (l1_hit) {
+                            // L1 HIT! GPU→GPU blit succeeded
                             ggml_backend_synchronize(ggml_backend_sched_get_backend(sched.get(), 0));
-
                             lmcache_chunks_found++;
 
                             if ((il == 0 || il == n_layer - 1) && (chunk_idx < 2 || is_prefill)) {
-                                fprintf(stderr, "LMCache RESTORED: layer=%d, chunk_start=%zu, bytes=%zu (total_found=%d)\n",
+                                fprintf(stderr, "LMCache L1 HIT (BLIT): layer=%d, chunk_start=%zu, bytes=%zu (total_found=%d)\n",
                                         il, chunk_start, chunk_bytes, lmcache_chunks_found);
                             }
                         } else {
-                            // Record missing chunk for approximate skip
-                            missing_chunks.push_back({
-                                il,
-                                chunk_start,
-                                std::min((size_t)THUNDER_CHUNK_SIZE, kv_end_pos_before - chunk_start),
-                                k_tensor,
-                                kv_cache->get_layer_v(il)
-                            });
+                            // L1 miss, fallback to L2/L3 (CPU→GPU)
+                            thunder_kv_chunk * cached = g_lmcache_storage->get(key);
+                            if (il == 0 && chunk_idx == 0 && is_prefill) {
+                                fprintf(stderr, "[DEBUG] L1 miss, trying L2/L3: layer=%d, chunk_start=%zu, hash=0x%016llx, cached=%p\n",
+                                        il, chunk_start, key.content_hash, (void*)cached);
+                                fflush(stderr);
+                            }
+
+                            if (cached && cached->k_data) {
+                                // L2/L3 hit, CPU→GPU transfer (~8ms)
+                                ggml_backend_tensor_set(k_tensor, cached->k_data, offset, cached->k_size);
+                                ggml_backend_synchronize(ggml_backend_sched_get_backend(sched.get(), 0));
+
+                                lmcache_chunks_found++;
+
+                                if ((il == 0 || il == n_layer - 1) && (chunk_idx < 2 || is_prefill)) {
+                                    fprintf(stderr, "LMCache L2/L3 HIT (CPU→GPU): layer=%d, chunk_start=%zu, bytes=%zu (total_found=%d)\n",
+                                            il, chunk_start, cached->k_size, lmcache_chunks_found);
+                                }
+                            } else {
+                                // Complete cache miss (L1, L2, L3 all missed)
+                                missing_chunks.push_back({
+                                    il,
+                                    chunk_start,
+                                    std::min((size_t)THUNDER_CHUNK_SIZE, kv_end_pos_before - chunk_start),
+                                    k_tensor,
+                                    kv_cache->get_layer_v(il)
+                                });
+                            }
                         }
                     }
                 }
@@ -1700,8 +1721,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
                         if (stored) {
                             // Only log first and last layer to reduce noise
                             if (il == 0 || il == n_layer - 1) {
-                                fprintf(stderr, "LMCache STORED: layer=%d, chunk_start=%zu, bytes=%zu\n",
-                                        il, chunk_start, chunk_bytes);
+                                fprintf(stderr, "LMCache STORED: layer=%d, chunk_start=%zu, hash=0x%016llx, bytes=%zu\n",
+                                        il, chunk_start, key.content_hash, chunk_bytes);
                             }
                         } else {
                             LLAMA_LOG_WARN("LMCache: failed to store chunk (cache full?)\n");

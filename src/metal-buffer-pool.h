@@ -80,6 +80,28 @@ public:
     bool has(uint64_t key_hash) const;
 
     /**
+     * Blit chunk from GPU pool to destination buffer (GPU→GPU copy)
+     *
+     * This is the core optimization for Week 2: instead of CPU→GPU transfer,
+     * we use Metal Blit Encoder to copy directly from L1 pool to KV cache.
+     *
+     * @param key_hash Hash of the chunk key
+     * @param dst_buffer Destination Metal buffer (KV cache tensor), passed as void*
+     * @param dst_offset Offset in destination buffer (bytes)
+     * @param chunk_size Size to copy (bytes)
+     * @return true if blit succeeded, false if chunk not found or error
+     *
+     * Performance: Metal Blit ~400 GB/s vs PCIe ~32 GB/s (12.5x faster)
+     *
+     * Note: dst_buffer is passed as void* for C++ compatibility. The __bridge cast
+     *       to id<MTLBuffer> is performed inside the .mm implementation.
+     */
+    bool blit_to_buffer(uint64_t key_hash,
+                        void* dst_buffer,
+                        size_t dst_offset,
+                        size_t chunk_size);
+
+    /**
      * Get the Metal buffer (for Metal blit operations)
      *
      * @return Metal buffer object
