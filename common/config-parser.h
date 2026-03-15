@@ -321,6 +321,15 @@ static void thunderllama_config_load_and_apply(common_params& params, const std:
         set_env("FUSED_QKV", "1");
     }
 
+    // USE_MPS_GRAPH (Metal Performance Shaders GEMM/GEMV acceleration)
+    // Default: disabled (0). Set to 1 to use MPS for eligible matmul ops.
+    // Phase 1: FP16 GEMM via MPSMatrixMultiplication
+    // Phase 2: Quantized GEMV via MPSGraph (future)
+    set_env("USE_MPS_GRAPH", get_string(config, "USE_MPS_GRAPH", "0"));
+    if (get_bool(config, "USE_MPS_GRAPH", false)) {
+        fprintf(stderr, "[CONFIG] USE_MPS_GRAPH enabled: MPS acceleration active\n");
+    }
+
     fprintf(stderr, "ThunderLLAMA: config applied\n");
 }
 

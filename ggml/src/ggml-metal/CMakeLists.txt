@@ -1,6 +1,7 @@
 find_library(FOUNDATION_LIBRARY Foundation REQUIRED)
 find_library(METAL_FRAMEWORK    Metal      REQUIRED)
 find_library(METALKIT_FRAMEWORK MetalKit   REQUIRED)
+find_library(MPS_FRAMEWORK      MetalPerformanceShaders REQUIRED)
 
 message(STATUS "Metal framework found")
 
@@ -12,12 +13,14 @@ ggml_add_backend_library(ggml-metal
                          ggml-metal-context.m
                          ggml-metal-ops.cpp
                          ggml-metal-cpu-neon.c
+                         ggml-metal-mps.mm
                         )
 
 target_link_libraries(ggml-metal PRIVATE
                       ${FOUNDATION_LIBRARY}
                       ${METAL_FRAMEWORK}
                       ${METALKIT_FRAMEWORK}
+                      ${MPS_FRAMEWORK}
                       )
 
 if (GGML_METAL_NDEBUG)

@@ -1,7 +1,7 @@
 # ThunderLLAMA 项目状态
 
-**最后更新**：2026-03-13
-**当前阶段**：Phase 3 完成，Phase 4 规划中
+**最后更新**：2026-03-15
+**当前阶段**：MPS Phase 1 完成，Phase 2 (Split-K GEMV) 进行中
 
 ---
 
@@ -290,3 +290,67 @@ ThunderLLAMA/
 
 **Updated**: 2026-03-14
 **Status**: KV Cache Quantization v1.0.0 Complete ✅
+
+---
+
+## ✅ MPS Integration Phase 1 (2026-03-15)
+
+### Metal Performance Shaders Foundation
+
+**Approach**: Hybrid — MPSMatrixMultiplication for FP16 GEMM, hand-written kernels for everything else.
+
+#### Files Added/Modified
+
+| File | Change |
+|------|--------|
+| `ggml/src/ggml-metal/ggml-metal-mps.h` | NEW - C-compatible MPS wrapper |
+| `ggml/src/ggml-metal/ggml-metal-mps.mm` | NEW - Obj-C++ implementation (318 lines) |
+| `ggml/src/ggml-metal/CMakeLists.txt` | ADD MPS framework + .mm source |
+| `ggml/src/ggml-metal/ggml-metal-device.h` | ADD mps_ctx getter |
+| `ggml/src/ggml-metal/ggml-metal-device.m` | ADD MPS context lifecycle |
+| `ggml/src/ggml-metal/ggml-metal-ops.cpp` | ADD MPS dispatch + encoder pause/resume |
+| `common/config-parser.h` | ADD USE_MPS_GRAPH config |
+| `thunderllama.conf` | ADD USE_MPS_GRAPH=0 |
+
+#### Key Design Decisions
+
+- **MPSMatrixMultiplication over MPSGraph**: Native buffer offset support
+- **Encoder pause/resume**: MPS encoding requires ending compute encoder first
+- **Manual memory management**: MRC (not ARC) for Obj-C++ code
+
+#### Verification
+
+| Check | Status |
+|-------|--------|
+| Build | 0 errors, 0 warnings |
+| MPS Init | Confirmed in server log |
+| Fallback (USE_MPS_GRAPH=0) | No behavioral change |
+
+---
+
+## 🔬 MPS Phase 2 Research Findings (2026-03-15)
+
+### Critical Discovery: MPSGraph Has No quantizedMatmul
+
+The original plan assumed MPSGraph provides fused dequant+matmul. **This is wrong** — that API belongs to MLX, not Apple's MPSGraph. MLX uses custom Metal kernels (STEEL GEMM) internally.
+
+### Decode GEMV Bandwidth Analysis
+
+| Metric | Value |
+|--------|-------|
+| Q5_K bits per weight | 5.5 bpw |
+| Active params per token | ~3B (MoE) |
+| Data read per token | ~2.06 GB |
+| M4 Pro bandwidth | ~273 GB/s |
+| Theoretical max TG | ~132 tok/s |
+| Current TG | 65-72 tok/s |
+| **Bandwidth utilization** | **50-55%** |
+
+**Root cause**: BS=1 kernel only uses 4-way K-dimension parallelism.
+
+### Selected Strategy: Split-K GEMV
+
+Split K dimension across multiple threadgroups for better bandwidth utilization.
+Target: 70-80% utilization → **85-105 tok/s**.
+
+Documentation: [docs/MPS_INTEGRATION.md](docs/MPS_INTEGRATION.md)

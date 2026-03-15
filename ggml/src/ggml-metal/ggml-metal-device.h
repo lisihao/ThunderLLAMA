@@ -264,6 +264,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev);
 
+// MPS (Metal Performance Shaders) context -- opaque pointer
+void * ggml_metal_device_get_mps_ctx(ggml_metal_device_t dev);
+
 //
 // device buffers
 //

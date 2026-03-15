@@ -80,6 +80,22 @@ Conclusion: Zero quality degradation
 FUSED_QKV=1
 ```
 
+### MPS Integration (Phase 1 Complete, Phase 2 In Progress)
+
+**Phase 1**: MPSMatrixMultiplication foundation for FP16 GEMM with encoder pause/resume mechanism.
+
+**Phase 2**: Split-K Decode GEMV optimization targeting **+25-45% TG** improvement:
+- Current BS=1 kernel uses only 4-way K parallelism → 50-55% bandwidth utilization
+- Split-K distributes K dimension across 8-16 threadgroups → target 70-80% utilization
+- Goal: Q5_K TG from 65-72 → **85-105 tok/s**
+
+```bash
+# Enable in thunderllama.conf (default: disabled until validated)
+USE_MPS_GRAPH=0
+```
+
+**Documentation**: [docs/MPS_INTEGRATION.md](docs/MPS_INTEGRATION.md)
+
 ### Other ThunderLLAMA Features
 
 - **Metal Kernel Fusion** - MoE gating fusion, TG **+10-12%** on M-series chips

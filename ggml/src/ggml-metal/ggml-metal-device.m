@@ -527,6 +527,9 @@ struct ggml_metal_device {
 
     // virtual address for GPU memory allocations
     atomic_uintptr_t addr_virt;
+
+    // MPS (Metal Performance Shaders) context for accelerated GEMM/GEMV
+    void * mps_ctx;
 };
 
 //
@@ -813,6 +816,26 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
                 dev->rsets = nil;
             }
 
+            // initialize MPS context
+            {
+                extern bool ggml_metal_mps_available(void);
+                extern void * ggml_metal_mps_init(void * device, void * queue);
+
+                if (ggml_metal_mps_available()) {
+                    dev->mps_ctx = ggml_metal_mps_init(
+                        (__bridge void *)dev->mtl_device,
+                        (__bridge void *)dev->mtl_queue);
+                    if (dev->mps_ctx) {
+                        GGML_LOG_INFO("%s: MPS context initialized\n", __func__);
+                    } else {
+                        GGML_LOG_WARN("%s: MPS context init failed\n", __func__);
+                    }
+                } else {
+                    dev->mps_ctx = NULL;
+                    GGML_LOG_INFO("%s: MPS not available on this system\n", __func__);
+                }
+            }
+
             // print MTL GPU family:
             GGML_LOG_INFO("%s: GPU name:   %s\n", __func__, dev->props.name);
 
@@ -863,6 +886,13 @@ ggml_metal_device_t ggml_metal_device_init(int device) {
 
 void ggml_metal_device_free(ggml_metal_device_t dev) {
     assert(dev != NULL);
+
+    // free MPS context
+    if (dev->mps_ctx) {
+        extern void ggml_metal_mps_free(void * ctx);
+        ggml_metal_mps_free(dev->mps_ctx);
+        dev->mps_ctx = NULL;
+    }
 
     ggml_metal_rsets_free(dev->rsets);
 
@@ -1256,6 +1286,10 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
 
 const struct ggml_metal_device_props * ggml_metal_device_get_props(ggml_metal_device_t dev) {
     return &dev->props;
+}
+
+void * ggml_metal_device_get_mps_ctx(ggml_metal_device_t dev) {
+    return dev->mps_ctx;
 }
 
 //

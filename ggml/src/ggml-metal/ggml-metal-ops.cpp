@@ -7,11 +7,13 @@
 #include "ggml-metal-impl.h"
 #include "ggml-metal-common.h"
 #include "ggml-metal-device.h"
+#include "ggml-metal-mps.h"
 
 #include <cassert>
 #include <algorithm>
 #include <limits>
 #include <cmath>
+#include <cstdlib>
 
 static ggml_metal_buffer_id ggml_metal_get_buffer_id(const ggml_tensor * t) {
     if (!t) {
@@ -39,6 +41,7 @@ struct ggml_metal_op {
         int  debug_fusion) {
         this->dev             = dev;
         this->lib             = ggml_metal_device_get_library(dev);
+        this->cmd_buf         = cmd_buf;
         this->enc             = ggml_metal_encoder_init(cmd_buf, use_concurrency);
         this->mem_ranges      = ggml_mem_ranges_init(debug_graph);
         this->idx_start       = idx_start;
@@ -88,10 +91,27 @@ struct ggml_metal_op {
         return ggml_can_fuse_ext(gf, idxs.data() + i0, ops, n_ops);
     }
 
-    ggml_metal_device_t  dev;
-    ggml_metal_library_t lib;
-    ggml_metal_encoder_t enc;
-    ggml_mem_ranges_t    mem_ranges;
+    // Pause the compute encoder so that MPS operations can be encoded on the command buffer.
+    // The encoder is ended and freed. Call resume_encoder() to recreate it.
+    void pause_encoder() {
+        if (enc) {
+            ggml_metal_encoder_end_encoding(enc);
+            ggml_metal_encoder_free(enc);
+            enc = nullptr;
+        }
+    }
+
+    // Resume the compute encoder after MPS operations. Creates a new encoder on the same command buffer.
+    void resume_encoder() {
+        assert(enc == nullptr);
+        enc = ggml_metal_encoder_init(cmd_buf, use_concurrency);
+    }
+
+    ggml_metal_device_t    dev;
+    ggml_metal_library_t   lib;
+    ggml_metal_cmd_buf_t   cmd_buf;
+    ggml_metal_encoder_t   enc;
+    ggml_mem_ranges_t      mem_ranges;
 
     bool use_fusion;
     bool use_concurrency;
@@ -2014,6 +2034,16 @@ int ggml_metal_op_pool_2d(ggml_metal_op_t ctx, int idx) {
     return 1;
 }
 
+// Check USE_MPS_GRAPH environment variable (cached)
+static bool ggml_metal_mps_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char * val = getenv("USE_MPS_GRAPH");
+        cached = (val && (val[0] == '1'));
+    }
+    return cached == 1;
+}
+
 int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
     ggml_tensor * op = ctx->node(idx);
 
@@ -2036,6 +2066,56 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
 
     const int16_t r2 = ne12/ne02;
     const int16_t r3 = ne13/ne03;
+
+    // MPS path: use MPSMatrixMultiplication for FP16 matmul
+    // Conditions:
+    //   - USE_MPS_GRAPH=1 environment variable
+    //   - src0 is FP16, contiguous rows
+    //   - src1 is FP32, contiguous rows
+    //   - 2D case: no batch broadcast (ne02==1, ne03==1, ne12==1, ne13==1)
+    //   - not transposed
+    if (ggml_metal_mps_enabled() &&
+        op->src[0]->type == GGML_TYPE_F16 &&
+        op->src[1]->type == GGML_TYPE_F32 &&
+        !ggml_is_transposed(op->src[0]) &&
+        !ggml_is_transposed(op->src[1]) &&
+        ne02 == 1 && ne03 == 1 &&
+        ne12 == 1 && ne13 == 1) {
+
+        ggml_metal_mps_ctx_t mps_ctx =
+            (ggml_metal_mps_ctx_t) ggml_metal_device_get_mps_ctx(ctx->dev);
+
+        if (mps_ctx) {
+            struct ggml_metal_buffer_id bid_src0 = ggml_metal_get_buffer_id(op->src[0]);
+            struct ggml_metal_buffer_id bid_src1 = ggml_metal_get_buffer_id(op->src[1]);
+            struct ggml_metal_buffer_id bid_dst  = ggml_metal_get_buffer_id(op);
+
+            // Pause the current compute encoder so MPS can encode on the command buffer
+            ctx->pause_encoder();
+
+            bool ok = ggml_metal_mps_mul_mat_f16(
+                mps_ctx,
+                ctx->cmd_buf,
+                bid_src0, bid_src1, bid_dst,
+                /*M=*/ ne01,  // rows of src0 (output rows)
+                /*N=*/ ne11,  // rows of src1 (output cols, after transpose)
+                /*K=*/ ne00,  // shared dimension
+                /*row_bytes_a=*/ nb01,
+                /*row_bytes_b=*/ nb11,
+                /*row_bytes_c=*/ nb1);
+
+            // Resume the compute encoder for subsequent ops
+            ctx->resume_encoder();
+            enc = ctx->enc;
+
+            if (ok) {
+                return 1;
+            }
+
+            // MPS failed, fall through to existing kernel path
+            GGML_LOG_WARN("[MPS] mul_mat_f16 failed, falling back to Metal kernel\n");
+        }
+    }
 
     // find the break-even point where the matrix-matrix kernel becomes more efficient compared
     // to the matrix-vector kernel
