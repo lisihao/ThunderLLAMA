@@ -21,8 +21,8 @@ echo "✅ 读取配置文件: $CONFIG_FILE"
 # ============================================================================
 # 加载配置
 # ============================================================================
-# 读取配置文件（忽略注释和空行）
-source <(grep -v '^#' "$CONFIG_FILE" | grep -v '^$')
+# 直接加载配置文件（Bash 会自动忽略注释）
+source "$CONFIG_FILE"
 
 echo "✅ 配置加载完成"
 
@@ -34,6 +34,7 @@ echo "=== 预检查 ==="
 
 # 1. 检查模型文件
 MODEL_PATH_EXPANDED="${MODEL_PATH/#\~/$HOME}"
+eval MODEL_PATH_EXPANDED="$MODEL_PATH_EXPANDED"  # 展开 $HOME 等变量
 if [ ! -f "$MODEL_PATH_EXPANDED" ]; then
     echo "❌ 模型文件不存在: $MODEL_PATH_EXPANDED"
     exit 1
@@ -96,6 +97,15 @@ export THUNDERLLAMA_CHUNK_PREFILL="$THUNDERLLAMA_CHUNK_PREFILL"
 
 if [ -n "$METAL_MAX_BUFFER_SIZE" ]; then
     export GGML_METAL_MAX_BUFFER_SIZE="$METAL_MAX_BUFFER_SIZE"
+fi
+
+# Metal Fusion 配置
+if [ "$METAL_FUSION" = "0" ]; then
+    export GGML_METAL_FUSION_DISABLE=1
+    echo "✅ METAL_FUSION=0 (disabled)"
+else
+    unset GGML_METAL_FUSION_DISABLE
+    echo "✅ METAL_FUSION=1 (enabled)"
 fi
 
 echo "✅ THUNDER_LMCACHE=$THUNDER_LMCACHE"
