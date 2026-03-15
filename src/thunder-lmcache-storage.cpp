@@ -34,6 +34,21 @@ ThunderChunkStorage::ThunderChunkStorage(
           return expand_tilde(env_path ? env_path : disk_path);
       }())
 {
+    // Read frequency protection threshold from environment
+    const char * env_freq = getenv("LMCACHE_FREQ_PROTECT");
+    if (env_freq) {
+        freq_protect_threshold_ = static_cast<uint32_t>(std::stoul(env_freq));
+    }
+
+    // Read TTL from environment (hours -> nanoseconds, 0 = infinite)
+    const char * env_ttl = getenv("LMCACHE_TTL_HOURS");
+    if (env_ttl) {
+        uint64_t ttl_hours = std::stoull(env_ttl);
+        ttl_ns_ = ttl_hours * 3600ULL * 1000000000ULL;
+    }
+
+    fprintf(stderr, "[ThunderChunkStorage] freq_protect_threshold=%u, ttl_hours=%llu\n",
+            freq_protect_threshold_, ttl_ns_ > 0 ? ttl_ns_ / (3600ULL * 1000000000ULL) : 0ULL);
     fprintf(stderr, "[ThunderChunkStorage] Using disk path: %s\n", disk_path_.c_str());
 
     // Attempt to initialize L3 disk storage
@@ -126,7 +141,7 @@ ThunderChunkStorage::ThunderChunkStorage(
 }
 
 ThunderChunkStorage::~ThunderChunkStorage() {
-    std::unique_lock<std::mutex> lock(mutex_);  // Cleanup resources
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Cleanup resources
 
     // Persist all L2 chunks to L3 before shutdown
     fprintf(stderr, "[ThunderChunkStorage] Persisting %zu L2 chunks to disk...\n", l2_cache_.size());
@@ -184,11 +199,28 @@ ThunderChunkStorage::~ThunderChunkStorage() {
 // ============================================================================
 
 bool ThunderChunkStorage::put(const thunder_kv_chunk & chunk) {
-    std::unique_lock<std::mutex> lock(mutex_);  // Write operation
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Write operation
 
     uint64_t key_hash = hash_key(chunk.key);
     size_t size = chunk_size(chunk);
     fprintf(stderr, "[Storage PUT] key_hash=%016llx, size=%zu\n", key_hash, size);
+
+    // Lazy TTL expiration: evict expired chunks on put (amortized O(1))
+    if (ttl_ns_ > 0) {
+        uint64_t now = current_time_ns();
+        size_t max_ttl_evictions = std::min(l2_lru_.size(), size_t(16));
+        // Check LRU tail (oldest chunk) — if expired, evict it
+        while (!l2_lru_.empty() && max_ttl_evictions-- > 0) {
+            uint64_t tail_hash = hash_key(l2_lru_.back());
+            auto tail_it = l2_cache_.find(tail_hash);
+            if (tail_it != l2_cache_.end() &&
+                now - tail_it->second.last_access_ns > ttl_ns_) {
+                evict_one_l2_to_l3();
+            } else {
+                break; // Tail is not expired, stop
+            }
+        }
+    }
 
     // Check if chunk already exists in L2
     auto l2_it = l2_cache_.find(key_hash);
@@ -285,7 +317,7 @@ bool ThunderChunkStorage::put(const thunder_kv_chunk & chunk) {
 }
 
 thunder_kv_chunk * ThunderChunkStorage::get(const thunder_kv_chunk_key & key) {
-    std::unique_lock<std::mutex> lock(mutex_);  // Modifies LRU + stats
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies LRU + stats
 
     uint64_t key_hash = hash_key(key);
     fprintf(stderr, "[Storage GET] key_hash=%016llx, l2_cache size=%zu\n", key_hash, l2_cache_.size());
@@ -394,7 +426,7 @@ std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
     std::vector<std::tuple<size_t, uint64_t, size_t>> l3_reads;  // (index, key_hash, offset)
 
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::shared_mutex> lock(mutex_);
 
         // Phase 1: Check L2 and identify L3 hits
         for (size_t i = 0; i < keys.size(); i++) {
@@ -437,20 +469,34 @@ std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
 
     // Phase 2: Parallel L3 reads (if any)
     if (!l3_reads.empty()) {
-        // Pre-evict L2 to make space for all L3 chunks
+        // Pre-evict L2 using real chunk sizes from L3 headers (not assumed 256KB)
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::lock_guard<std::shared_mutex> lock(mutex_);
             size_t total_needed = 0;
             for (const auto & [index, key_hash, offset] : l3_reads) {
-                total_needed += 256 * 1024;  // Assume ~256KB per chunk
+                // Read only the header (16 bytes offset) to get k_size and v_size
+                // Header layout: content_hash(8) + layer_idx(4) + chunk_start(4) + k_size(8) + v_size(8)
+                if (offset + 32 <= disk_mmap_size_ && disk_mmap_) {
+                    uint8_t * ptr = static_cast<uint8_t *>(disk_mmap_) + offset + 16;
+                    size_t k_size, v_size;
+                    memcpy(&k_size, ptr, 8);
+                    memcpy(&v_size, ptr + 8, 8);
+                    total_needed += k_size + v_size;
+                } else {
+                    total_needed += 256 * 1024; // Fallback estimate
+                }
             }
             size_t space_available = (l2_limit_bytes_ > l2_usage_bytes_)
                                    ? (l2_limit_bytes_ - l2_usage_bytes_) : 0;
             if (total_needed > space_available) {
                 size_t to_evict = total_needed - space_available;
-                fprintf(stderr, "[Batch GET] Pre-evicting %zu MB from L2 to make space...\n",
-                        to_evict / (1024 * 1024));
-                evict_lru(to_evict);
+                fprintf(stderr, "[Batch GET] Pre-evicting %zu MB from L2 (need %zu MB for %zu chunks)...\n",
+                        to_evict / (1024 * 1024), total_needed / (1024 * 1024), l3_reads.size());
+                // Evict inline (mutex already held)
+                size_t freed = 0;
+                while (freed < to_evict && !l2_cache_.empty()) {
+                    freed += evict_one_l2_to_l3();
+                }
             }
         }
 
@@ -488,7 +534,7 @@ std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
 
         // Collect results and promote to L2
         {
-            std::unique_lock<std::mutex> lock(mutex_);
+            std::unique_lock<std::shared_mutex> lock(mutex_);
 
             for (auto & future : futures) {
                 auto [index, chunk] = future.get();
@@ -531,28 +577,35 @@ std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
 
                     results[index] = &l2_cache_[key_hash];
                 } else {
-                    // L2 full, cannot promote to L2
-                    // BUT we still return the chunk (caller must handle memory)
-                    //
-                    // WARNING: This chunk is NOT cached in L2/L3!
-                    // It's a temporary allocation that caller must manage.
-                    //
-                    // For now, we insert into a temporary map (not ideal, but works)
-                    fprintf(stderr, "[Batch GET] ⚠️  L2 full, cannot promote chunk %zu\n", index);
+                    // L2 full — force-evict to make space (fixes FIXME memory leak)
+                    while (l2_usage_bytes_ + size > l2_limit_bytes_ && !l2_cache_.empty()) {
+                        evict_one_l2_to_l3();
+                    }
 
-                    // FIXME: This is a hack - we're leaking memory here
-                    // The chunk is neither in L2 nor L3, just floating
-                    //
-                    // Proper fix would be to either:
-                    // 1. Evict LRU from L2 to make space
-                    // 2. Return a vector of unique_ptr<thunder_kv_chunk>
-                    //
-                    // For now, treat as miss
-                    free(chunk.k_data);
-                    free(chunk.v_data);
-
-                    total_misses_++;
-                    total_hits_--;  // Revert hit count
+                    if (l2_usage_bytes_ + size <= l2_limit_bytes_) {
+                        // Now we have space — promote
+                        auto l3_it2 = l3_offsets_.find(key_hash);
+                        if (l3_it2 != l3_offsets_.end()) {
+                            l3_offsets_.erase(l3_it2);
+                            l3_usage_bytes_ -= size;
+                            auto lru_it2 = l3_lru_index_.find(key_hash);
+                            if (lru_it2 != l3_lru_index_.end()) {
+                                l3_lru_.erase(lru_it2->second);
+                                l3_lru_index_.erase(lru_it2);
+                            }
+                        }
+                        l2_cache_[key_hash] = chunk;
+                        l2_usage_bytes_ += size;
+                        l2_lru_.push_front(keys[index]);
+                        l2_lru_index_[key_hash] = l2_lru_.begin();
+                        results[index] = &l2_cache_[key_hash];
+                    } else {
+                        // Truly cannot fit (chunk larger than total L2) — treat as miss
+                        free(chunk.k_data);
+                        free(chunk.v_data);
+                        total_misses_++;
+                        total_hits_--;
+                    }
                 }
             }
         }
@@ -564,7 +617,7 @@ std::vector<thunder_kv_chunk *> ThunderChunkStorage::batch_get(
 }
 
 void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
-    std::unique_lock<std::mutex> lock(mutex_);  // Write operation
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Write operation
 
     size_t freed = 0;
     while (freed < target_free_bytes && !l2_cache_.empty()) {
@@ -573,24 +626,55 @@ void ThunderChunkStorage::evict_lru(size_t target_free_bytes) {
 }
 
 size_t ThunderChunkStorage::get_cpu_usage_bytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l2_usage_bytes_;
 }
 
 size_t ThunderChunkStorage::get_disk_usage_bytes() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l3_usage_bytes_;
 }
 
 double ThunderChunkStorage::get_hit_rate() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     uint64_t total = total_hits_ + total_misses_;
     return total > 0 ? static_cast<double>(total_hits_) / total : 0.0;
 }
 
 size_t ThunderChunkStorage::get_total_chunks() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l2_cache_.size() + l3_offsets_.size();
+}
+
+size_t ThunderChunkStorage::get_l2_chunk_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return l2_cache_.size();
+}
+
+size_t ThunderChunkStorage::get_l3_chunk_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return l3_offsets_.size();
+}
+
+size_t ThunderChunkStorage::get_l2_limit_bytes() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return l2_limit_bytes_;
+}
+
+size_t ThunderChunkStorage::get_l3_limit_bytes() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return l3_limit_bytes_;
+}
+
+void ThunderChunkStorage::get_eviction_stats(
+    uint64_t * l2_to_l3_evictions,
+    uint64_t * l3_permanent_evictions,
+    uint64_t * freq_protected_saves
+) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    if (l2_to_l3_evictions) *l2_to_l3_evictions = l2_to_l3_evictions_;
+    if (l3_permanent_evictions) *l3_permanent_evictions = l3_permanent_evictions_;
+    if (freq_protected_saves) *freq_protected_saves = freq_protected_saves_;
 }
 
 // ============================================================================
@@ -638,14 +722,53 @@ size_t ThunderChunkStorage::evict_one_l2_to_l3() {
         return 0;
     }
 
-    // Get LRU chunk (back of list)
-    thunder_kv_chunk_key key = l2_lru_.back();
+    // Frequency-protected LRU: scan from tail, skip hot chunks (second chance)
+    // Walk from LRU tail; give "second chance" to high-frequency chunks
+    // by halving their frequency and moving them to front. O(1) amortized.
+    static constexpr size_t SECOND_CHANCE_SCAN_DEPTH = 8;
+    auto lru_it = std::prev(l2_lru_.end());
+    const size_t max_scan = std::min(l2_lru_.size(), SECOND_CHANCE_SCAN_DEPTH);
+    size_t scanned = 0;
+
+    while (scanned < max_scan) {
+        uint64_t candidate_hash = hash_key(*lru_it);
+        auto freq_it = access_freq_.find(candidate_hash);
+        uint32_t freq = freq_it != access_freq_.end() ? freq_it->second : 0;
+
+        if (freq > freq_protect_threshold_) {
+            // Hot chunk: give second chance — decay frequency by half, move to front
+            if (freq_it != access_freq_.end()) {
+                freq_it->second /= 2;
+            }
+            freq_protected_saves_++;
+
+            // Move to front of LRU (most recently used)
+            auto saved_key = *lru_it;
+            l2_lru_.erase(lru_it);  // Invalidates lru_it only; other iterators remain valid
+            l2_lru_.push_front(saved_key);
+            l2_lru_index_[candidate_hash] = l2_lru_.begin();
+
+            // Continue from the new tail (what was second-to-last before)
+            if (l2_lru_.size() <= 1) {
+                break;
+            }
+            lru_it = std::prev(l2_lru_.end());
+            scanned++;
+            continue;
+        }
+
+        // Found a cold chunk to evict
+        break;
+    }
+
+    // Get the victim chunk
+    thunder_kv_chunk_key key = *lru_it;
     uint64_t key_hash = hash_key(key);
 
     auto it = l2_cache_.find(key_hash);
     if (it == l2_cache_.end()) {
         // Inconsistent state, remove from LRU
-        l2_lru_.pop_back();
+        l2_lru_.erase(lru_it);
         l2_lru_index_.erase(key_hash);
         return 0;
     }
@@ -673,9 +796,11 @@ size_t ThunderChunkStorage::evict_one_l2_to_l3() {
     l2_cache_.erase(it);
     l2_usage_bytes_ -= size;
 
-    // Remove from L2 LRU
-    l2_lru_.pop_back();
+    // Remove from L2 LRU (use iterator, not pop_back, since we may have scanned past tail)
+    l2_lru_.erase(lru_it);
     l2_lru_index_.erase(key_hash);
+
+    l2_to_l3_evictions_++;
 
     return size;
 }
@@ -685,14 +810,47 @@ size_t ThunderChunkStorage::evict_one_l3() {
         return 0;
     }
 
-    // Get LRU chunk (back of list)
-    thunder_kv_chunk_key key = l3_lru_.back();
+    // Frequency-protected LRU for L3: scan from tail, skip hot chunks
+    static constexpr size_t SECOND_CHANCE_SCAN_DEPTH_L3 = 8;
+    auto lru_it = std::prev(l3_lru_.end());
+    const size_t max_scan = std::min(l3_lru_.size(), SECOND_CHANCE_SCAN_DEPTH_L3);
+    size_t scanned = 0;
+
+    while (scanned < max_scan) {
+        uint64_t candidate_hash = hash_key(*lru_it);
+        auto freq_it = access_freq_.find(candidate_hash);
+        uint32_t freq = freq_it != access_freq_.end() ? freq_it->second : 0;
+
+        if (freq > freq_protect_threshold_) {
+            // Hot chunk: second chance — decay and move to front
+            if (freq_it != access_freq_.end()) {
+                freq_it->second /= 2;
+            }
+            freq_protected_saves_++;
+
+            auto saved_key = *lru_it;
+            l3_lru_.erase(lru_it);
+            l3_lru_.push_front(saved_key);
+            l3_lru_index_[candidate_hash] = l3_lru_.begin();
+
+            // Continue from the new tail
+            if (l3_lru_.size() <= 1) {
+                break;
+            }
+            lru_it = std::prev(l3_lru_.end());
+            scanned++;
+            continue;
+        }
+        break;
+    }
+
+    thunder_kv_chunk_key key = *lru_it;
     uint64_t key_hash = hash_key(key);
 
     auto it = l3_offsets_.find(key_hash);
     if (it == l3_offsets_.end()) {
         // Inconsistent state, remove from LRU
-        l3_lru_.pop_back();
+        l3_lru_.erase(lru_it);
         l3_lru_index_.erase(key_hash);
         return 0;
     }
@@ -717,7 +875,7 @@ size_t ThunderChunkStorage::evict_one_l3() {
     l3_usage_bytes_ -= size;
 
     // Remove from L3 LRU
-    l3_lru_.pop_back();
+    l3_lru_.erase(lru_it);
     l3_lru_index_.erase(key_hash);
 
     // Update chunk-level index: clear this layer's bit
@@ -733,7 +891,8 @@ size_t ThunderChunkStorage::evict_one_l3() {
     }
 
     // Note: Disk space is not reclaimed (would require compaction)
-    // For Phase 1, we just mark the space as unused
+
+    l3_permanent_evictions_++;
 
     return size;
 }
@@ -1301,7 +1460,7 @@ void ThunderChunkStorage::disable_l3() {
 }
 
 void ThunderChunkStorage::safe_unmount() {
-    std::unique_lock<std::mutex> lock(mutex_);  // Modifies L3 state
+    std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies L3 state
 
     if (!l3_enabled_) {
         fprintf(stderr, "[ThunderChunkStorage] L3 already disabled, nothing to unmount\n");
@@ -1342,7 +1501,7 @@ void ThunderChunkStorage::safe_unmount() {
 }
 
 bool ThunderChunkStorage::is_l3_enabled() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     return l3_enabled_;
 }
 
@@ -1356,7 +1515,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
     // Build list of (key_hash, access_count, offset) tuples
     std::vector<std::tuple<uint64_t, uint32_t, size_t>> prefetch_list;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::shared_mutex> lock(mutex_);
         for (const auto & [key_hash, count] : access_freq_) {
             // Only prefetch chunks that are in L3 (not already in L2)
             auto l3_it = l3_offsets_.find(key_hash);
@@ -1386,7 +1545,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
 
     auto read_chunk_async = [this](uint64_t key_hash, size_t offset) -> std::pair<uint64_t, thunder_kv_chunk> {
         thunder_kv_chunk chunk;
-        std::lock_guard<std::mutex> lock(mutex_); // Protect mmap access
+        std::shared_lock<std::shared_mutex> lock(mutex_); // Read-only mmap access
         if (read_from_disk(offset, chunk)) {
             return {key_hash, chunk};
         } else {
@@ -1405,7 +1564,7 @@ void ThunderChunkStorage::prefetch_hot_chunks(size_t top_n) {
     // Collect results and insert into L2
     size_t prefetched = 0;
     {
-        std::unique_lock<std::mutex> lock(mutex_);  // Modifies L2 and L3
+        std::unique_lock<std::shared_mutex> lock(mutex_);  // Modifies L2 and L3
 
         for (auto & future : futures) {
             auto [key_hash, chunk] = future.get();
@@ -1471,7 +1630,7 @@ thunder_prefix_match ThunderChunkStorage::find_prefix_match(
         return result;  // Invalid input
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);  // Read-only operation
+    std::shared_lock<std::shared_mutex> lock(mutex_);  // Read-only operation
 
     // ContextPilot chunk hash matching (if available)
     if (contextpilot_chunk_hashes && !contextpilot_chunk_hashes->empty()) {

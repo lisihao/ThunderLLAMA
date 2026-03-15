@@ -19,7 +19,7 @@ ThunderLLAMA 持续优化 — Metal Fusion + GPU Pool + Paged Attention
 ### 独立任务
 - [ ] **#1 Metal Performance Shaders (MPS) 集成** — 用 Apple MPS 框架替代手写 kernel
 - [ ] **#2 Paged Attention 优化（对标 vllm-mlx）** — 重新实现，解决当前缺陷
-- [ ] **#9 Week 3: LRU 策略和最终优化** — LMCache/GPU Buffer Pool 驱逐策略
+- [x] **#9 Week 3: LRU 策略和最终优化** — LMCache LRU/LFU 驱逐策略 ✅
 
 ### Metal JIT Fusion Pipeline (Week 6-8, 顺序依赖)
 - [ ] **#3 Week 6.1: ggml Graph 分析器** — 解析计算图，识别可融合模式
@@ -84,6 +84,19 @@ ThunderLLAMA 持续优化 — Metal Fusion + GPU Pool + Paged Attention
 ## In-Progress
 无
 
+## Recently Completed (2026-03-15)
+- ✅ **Task #9: LRU 策略和最终优化** — LMCache 生产级升级
+  - **Phase 1A**: L2/L3 容量可配置 (LMCACHE_L2_SIZE_GB / LMCACHE_L3_SIZE_GB)
+  - **Phase 1B**: 频率保护 LRU (second-chance scan, freq decay, threshold=5)
+  - **Phase 2A**: 修复 batch_get() 内存泄漏 (L3→L2 promote 时预驱逐)
+  - **Phase 2B**: 完善驱逐统计 (l2_to_l3_evictions, l3_permanent_evictions, freq_protected_saves, utilization)
+  - **Phase 2C**: shared_mutex 读写锁 (并发读不阻塞)
+  - **Phase 3A**: TTL 支持 (LMCACHE_TTL_HOURS, lazy expiration)
+  - **Phase 3B**: 缓存预热 API (POST /lmcache/warm)
+  - **Phase 3C**: thunderllama.conf 新配置项文档
+  - **Code Review**: 修复 3 个 CRITICAL/HIGH 问题 (iterator direction, deadlock, infinite loop)
+  - **Build**: ✅ [100%] Built target llama-server
+
 ## Blocked
 - Normalization chain (SUM_ROWS→CLAMP→DIV) 融合受 graph scheduler 限制
 
@@ -96,7 +109,7 @@ ThunderLLAMA 持续优化 — Metal Fusion + GPU Pool + Paged Attention
 - [ ] #6 Week 7.2: Metal Kernel Code Generator (← #5)
 - [ ] #7 Week 8.1: Metal JIT Compiler (← #6)
 - [ ] #8 Week 8.2: 集成到 ggml-metal (← #7)
-- [ ] #9 Week 3: LRU 策略和最终优化
+- [x] #9 Week 3: LRU 策略和最终优化 ✅
 
 # 风险点
 - ⚠️ 如果重新测试无法复现 3-4x 提升，可能需要检查：
@@ -104,11 +117,8 @@ ThunderLLAMA 持续优化 — Metal Fusion + GPU Pool + Paged Attention
   - 缓存是否真正触发（检查日志中的 STORED/RESTORED）
   - Prompt 长度是否足够（需要 > 256 tokens）
 
-# Current Action - COMPLETED ✅
-完成 ThunderLLAMA LMCache 性能测试：
-- Baseline: THUNDER_LMCACHE=0
-- LMCache: THUNDER_LMCACHE=1, disk_path=/Volumes/toshiba/lmcache.bin
-- 测试脚本: test_full_stack.py (~1500 tokens prompt)
+# Current Action
+准备开始 #1 Metal Performance Shaders (MPS) 集成
 
 # 重大发现：ContextPilot + LMCache 组合
 

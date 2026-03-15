@@ -204,6 +204,7 @@ int main(int argc, char ** argv) {
     ctx_http.get ("/v1/health",           ex_wrapper(routes.get_health)); // public endpoint (no API key check)
     ctx_http.get ("/metrics",             ex_wrapper(routes.get_metrics));
     ctx_http.get ("/lmcache/stats",       ex_wrapper(routes.get_lmcache_stats));
+    ctx_http.post("/lmcache/warm",        ex_wrapper(routes.post_lmcache_warm));
     ctx_http.get ("/props",               ex_wrapper(routes.get_props));
     ctx_http.post("/props",               ex_wrapper(routes.post_props));
     ctx_http.post("/api/show",            ex_wrapper(routes.get_api_show));

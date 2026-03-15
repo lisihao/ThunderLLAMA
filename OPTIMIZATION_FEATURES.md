@@ -28,6 +28,10 @@
 | **Data Compression** | 自动 (L3 层) | - | zlib 压缩 | 2-4x 存储节省 | `src/thunder-lmcache-storage.cpp:12` |
 | **Checksum Validation** | 自动 (L3 层) | - | XXH64 完整性校验 | 数据完整性保证 | `src/thunder-lmcache-storage.cpp:18` |
 | **Adaptive Chunk Prefill** | `THUNDERLLAMA_CHUNK_PREFILL=N` | `max(32, n_batch/slots)` | 自适应分块大小 | 减少延迟抖动 | `tools/server/server-context.cpp:2120` |
+| **LRU Freq-Protected** | `LMCACHE_FREQ_PROTECT=N` | `5` | 高频 chunk 免于驱逐 (second-chance) | 热点数据不被挤出 | `src/thunder-lmcache-storage.cpp` |
+| **Cache Warm API** | `POST /lmcache/warm` | - | L3→L2 热数据预加载 | 冷启动加速 | `tools/server/server-context.cpp` |
+| **TTL Expiration** | `LMCACHE_TTL_HOURS=N` | `0` (永不过期) | 过期 chunk 自动清理 | 防止缓存膨胀 | `src/thunder-lmcache-storage.cpp` |
+| **Configurable Capacity** | `LMCACHE_L2_SIZE_GB` / `L3_SIZE_GB` | `8` / `256` | L2/L3 容量可配置 | 灵活适配硬件 | `thunderllama.conf` |
 
 ## 2. Attention 机制优化（2项）
 
@@ -97,6 +101,10 @@
 | `LLAMA_PAGED_ATTENTION` | 启用 Paged Attention | `0` | `src/llama-context.cpp:293` |
 | `GGML_METAL_FUSION_DISABLE` | 禁用 Metal 内核融合 | 未设置(启用) | `ggml/src/ggml-metal/ggml-metal-context.m` |
 | `FUSED_QKV` | 启用 K/V Projection Fusion | `1` | `src/llama-qkv-fusion.cpp` |
+| `LMCACHE_L2_SIZE_GB` | L2 内存缓存容量 (GB) | `8` | `src/llama-context.cpp` |
+| `LMCACHE_L3_SIZE_GB` | L3 磁盘缓存容量 (GB) | `256` | `src/llama-context.cpp` |
+| `LMCACHE_FREQ_PROTECT` | 频率保护阈值 | `5` | `src/thunder-lmcache-storage.cpp` |
+| `LMCACHE_TTL_HOURS` | chunk 最大存活时间 (小时) | `0` (永不过期) | `src/thunder-lmcache-storage.cpp` |
 
 ---
 
@@ -180,9 +188,19 @@ curl http://localhost:8080/lmcache/stats
   "skip_count": 30,
   "approx_skip_count": 15,
   "total_skip_rate": 0.45,
-  "l2_chunks": 5000,
-  "l3_chunks": 20000,
-  "hit_rate": 0.85
+  "l2_chunks": 432,
+  "l2_usage_bytes": 15138816,
+  "l2_limit_bytes": 8589934592,
+  "l2_utilization": 0.0018,
+  "l3_chunks": 48,
+  "l3_usage_bytes": 293830656,
+  "l3_limit_bytes": 274877906944,
+  "l3_utilization": 0.0011,
+  "total_chunks": 480,
+  "l2_to_l3_evictions": 0,
+  "l3_permanent_evictions": 0,
+  "freq_protected_saves": 0,
+  "l2_hit_rate": 0.9999
 }
 ```
 
@@ -205,14 +223,14 @@ curl http://localhost:8080/lmcache/stats
 
 | 类别 | 优化项数量 |
 |------|-----------|
-| **ThunderLLAMA 独有** | 9 |
+| **ThunderLLAMA 独有** | 13 |
 | **Attention 机制** | 2 |
 | **KV Cache 优化** | 7 |
 | **并发批处理** | 4 |
 | **硬件加速** | 6 |
 | **内存管理** | 4 |
 | **推测优化** | 2 |
-| **总计** | **34 个可用优化项** |
+| **总计** | **38 个可用优化项** |
 
 ---
 
@@ -246,6 +264,6 @@ curl http://localhost:8080/lmcache/stats
 
 ---
 
-**文档版本**: v1.2
+**文档版本**: v1.3
 **更新日期**: 2026-03-15
 **验证方式**: 代码扫描 + 文档审查 + 性能基准测试 + 正确性验证

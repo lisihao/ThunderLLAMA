@@ -78,7 +78,7 @@ FUSED_QKV=1
 ### Other ThunderLLAMA Features
 
 - **Metal Kernel Fusion** - MoE gating fusion, TG **+10-12%** on M-series chips
-- **LMCache Integration** - Content-based KV cache reuse (256-token chunks), **27x** repeat acceleration
+- **LMCache Integration** - Two-tier KV cache (L2 CPU + L3 Disk), freq-protected LRU, **27x** repeat acceleration
 - **Paged Attention** - Efficient memory management for long contexts
 - **Configuration-Driven** - All settings in `thunderllama.conf` (no CLI args needed)
 

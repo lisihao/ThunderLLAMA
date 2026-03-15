@@ -57,9 +57,19 @@ static void initialize_global_lmcache() {
             path = std::string(home ? home : "/tmp") + "/.cache/thunderllama/kv_cache.bin";
         }
 
+        // Read configurable L2/L3 sizes from environment (set by config-parser.h)
+        size_t l2_size_gb = 8;
+        size_t l3_size_gb = 256;
+        const char * env_l2 = getenv("LMCACHE_L2_SIZE_GB");
+        const char * env_l3 = getenv("LMCACHE_L3_SIZE_GB");
+        if (env_l2) { l2_size_gb = std::stoull(env_l2); }
+        if (env_l3) { l3_size_gb = std::stoull(env_l3); }
+
+        fprintf(stderr, "[LMCache] L2 size: %zu GB, L3 size: %zu GB\n", l2_size_gb, l3_size_gb);
+
         g_lmcache_storage = std::make_unique<ThunderChunkStorage>(
-            8ULL * 1024 * 1024 * 1024,  // L2: 8GB CPU
-            256ULL * 1024 * 1024 * 1024, // L3: 256GB Disk
+            l2_size_gb * 1024ULL * 1024 * 1024,  // L2 CPU
+            l3_size_gb * 1024ULL * 1024 * 1024,   // L3 Disk
             path
         );
 

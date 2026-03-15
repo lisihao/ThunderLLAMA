@@ -219,18 +219,39 @@ struct llama_context {
         if (approx_skip_count) *approx_skip_count = lmcache_approx_skip_count;
     }
 
-    // Get chunk storage statistics (Task 2.3)
+    // Prefetch hot chunks from L3 to L2
+    void lmcache_prefetch_hot(size_t top_n) {
+        if (g_lmcache_storage) {
+            g_lmcache_storage->prefetch_hot_chunks(top_n);
+        }
+    }
+
+    // Get chunk storage statistics (Task 2.3, extended in Task 9)
     void get_chunk_storage_stats(
         uint64_t * total_chunks,
         uint64_t * l2_usage_bytes,
         uint64_t * l3_usage_bytes,
-        double * hit_rate
+        double * hit_rate,
+        uint64_t * l2_chunk_count = nullptr,
+        uint64_t * l3_chunk_count = nullptr,
+        uint64_t * l2_limit = nullptr,
+        uint64_t * l3_limit = nullptr,
+        uint64_t * l2_to_l3_evictions = nullptr,
+        uint64_t * l3_permanent_evictions = nullptr,
+        uint64_t * freq_protected_saves = nullptr
     ) const {
         if (!g_lmcache_storage) {
             if (total_chunks) *total_chunks = 0;
             if (l2_usage_bytes) *l2_usage_bytes = 0;
             if (l3_usage_bytes) *l3_usage_bytes = 0;
             if (hit_rate) *hit_rate = 0.0;
+            if (l2_chunk_count) *l2_chunk_count = 0;
+            if (l3_chunk_count) *l3_chunk_count = 0;
+            if (l2_limit) *l2_limit = 0;
+            if (l3_limit) *l3_limit = 0;
+            if (l2_to_l3_evictions) *l2_to_l3_evictions = 0;
+            if (l3_permanent_evictions) *l3_permanent_evictions = 0;
+            if (freq_protected_saves) *freq_protected_saves = 0;
             return;
         }
 
@@ -238,6 +259,13 @@ struct llama_context {
         if (l2_usage_bytes) *l2_usage_bytes = g_lmcache_storage->get_cpu_usage_bytes();
         if (l3_usage_bytes) *l3_usage_bytes = g_lmcache_storage->get_disk_usage_bytes();
         if (hit_rate) *hit_rate = g_lmcache_storage->get_hit_rate();
+        if (l2_chunk_count) *l2_chunk_count = g_lmcache_storage->get_l2_chunk_count();
+        if (l3_chunk_count) *l3_chunk_count = g_lmcache_storage->get_l3_chunk_count();
+        if (l2_limit) *l2_limit = g_lmcache_storage->get_l2_limit_bytes();
+        if (l3_limit) *l3_limit = g_lmcache_storage->get_l3_limit_bytes();
+        if (l2_to_l3_evictions || l3_permanent_evictions || freq_protected_saves) {
+            g_lmcache_storage->get_eviction_stats(l2_to_l3_evictions, l3_permanent_evictions, freq_protected_saves);
+        }
     }
 
 private:

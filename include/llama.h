@@ -992,6 +992,12 @@ extern "C" {
         uint64_t * approx_skip_count
     );
 
+    // Trigger LMCache cache warm: prefetch top-N hot chunks from L3 to L2
+    LLAMA_API void llama_lmcache_prefetch_hot(
+        struct llama_context * ctx,
+        size_t top_n
+    );
+
     // Get LMCache chunk storage statistics (Task 2.3)
     // Returns: total_chunks, l2_usage_bytes, l3_usage_bytes, hit_rate
     LLAMA_API void llama_get_chunk_storage_stats(
@@ -1000,6 +1006,20 @@ extern "C" {
         uint64_t * l2_usage_bytes,
         uint64_t * l3_usage_bytes,
         double * hit_rate
+    );
+
+    // Get LMCache extended storage statistics (Task 9)
+    // Returns eviction counters, per-tier chunk counts, capacity limits
+    // Pass NULL for any output parameter you don't need
+    LLAMA_API void llama_get_chunk_storage_stats_ext(
+        const struct llama_context * ctx,
+        uint64_t * l2_chunk_count,
+        uint64_t * l3_chunk_count,
+        uint64_t * l2_limit,
+        uint64_t * l3_limit,
+        uint64_t * l2_to_l3_evictions,
+        uint64_t * l3_permanent_evictions,
+        uint64_t * freq_protected_saves
     );
 
     // Token logits obtained from the last call to llama_decode()

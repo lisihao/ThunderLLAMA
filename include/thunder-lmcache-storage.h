@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <list>
 #include <mutex>
+#include <shared_mutex>
 #include <bitset>
 
 /**
@@ -204,6 +205,35 @@ public:
     size_t get_total_chunks() const;
 
     /**
+     * @brief Get L2 chunk count.
+     */
+    size_t get_l2_chunk_count() const;
+
+    /**
+     * @brief Get L3 chunk count.
+     */
+    size_t get_l3_chunk_count() const;
+
+    /**
+     * @brief Get L2 capacity limit in bytes.
+     */
+    size_t get_l2_limit_bytes() const;
+
+    /**
+     * @brief Get L3 capacity limit in bytes.
+     */
+    size_t get_l3_limit_bytes() const;
+
+    /**
+     * @brief Get eviction statistics.
+     */
+    void get_eviction_stats(
+        uint64_t * l2_to_l3_evictions,
+        uint64_t * l3_permanent_evictions,
+        uint64_t * freq_protected_saves
+    ) const;
+
+    /**
      * @brief Safely unmount disk cache for external storage removal.
      *
      * Stops accepting new writes to L3, syncs all pending data, and closes disk file.
@@ -335,6 +365,16 @@ private:
     uint64_t total_accesses_ = 0;
 
     // ========================================================================
+    // Frequency-Protected LRU
+    // ========================================================================
+
+    // Minimum access frequency to protect a chunk from eviction (second chance)
+    uint32_t freq_protect_threshold_ = 5;
+
+    // TTL in nanoseconds (0 = infinite, no expiration)
+    uint64_t ttl_ns_ = 0;
+
+    // ========================================================================
     // Statistics
     // ========================================================================
 
@@ -344,12 +384,17 @@ private:
     // Total cache misses
     mutable uint64_t total_misses_ = 0;
 
+    // Eviction counters
+    uint64_t l2_to_l3_evictions_ = 0;
+    uint64_t l3_permanent_evictions_ = 0;
+    uint64_t freq_protected_saves_ = 0;
+
     // ========================================================================
     // Thread Safety
     // ========================================================================
 
-    // Mutex protecting all data structures
-    mutable std::mutex mutex_;
+    // Shared mutex: read-only operations use shared_lock, write operations use unique_lock
+    mutable std::shared_mutex mutex_;
 
     // ========================================================================
     // Private Methods

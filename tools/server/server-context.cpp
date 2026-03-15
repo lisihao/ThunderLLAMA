@@ -3572,11 +3572,20 @@ void server_routes::init_routes() {
         uint64_t l2_bytes = 0;
         uint64_t l3_bytes = 0;
         double storage_hit_rate = 0.0;
+        uint64_t l2_chunk_count = 0;
+        uint64_t l3_chunk_count = 0;
+        uint64_t l2_limit = 0;
+        uint64_t l3_limit = 0;
+        uint64_t l2_to_l3_evictions = 0;
+        uint64_t l3_permanent_evictions = 0;
+        uint64_t freq_protected_saves = 0;
 
         auto * ctx = ctx_server.get_ctx();
         if (ctx) {
             llama_get_lmcache_stats(ctx, &total_prefills, &skip_count, &approx_skip_count);
             llama_get_chunk_storage_stats(ctx, &total_chunks, &l2_bytes, &l3_bytes, &storage_hit_rate);
+            llama_get_chunk_storage_stats_ext(ctx, &l2_chunk_count, &l3_chunk_count, &l2_limit, &l3_limit,
+                                              &l2_to_l3_evictions, &l3_permanent_evictions, &freq_protected_saves);
         }
 
         // Calculate skip rates
@@ -3587,6 +3596,10 @@ void server_routes::init_routes() {
             total_skip_rate = (double)(skip_count + approx_skip_count) / (double)total_prefills;
         }
 
+        // Calculate utilization percentages
+        double l2_utilization = l2_limit > 0 ? (double)l2_bytes / (double)l2_limit : 0.0;
+        double l3_utilization = l3_limit > 0 ? (double)l3_bytes / (double)l3_limit : 0.0;
+
         res->ok({
             {"total_prefills", total_prefills},
             {"skip_count", skip_count},
@@ -3594,12 +3607,47 @@ void server_routes::init_routes() {
             {"total_skip_count", skip_count + approx_skip_count},
             {"skip_rate", skip_rate},
             {"total_skip_rate", total_skip_rate},
-            {"l2_hit_rate", storage_hit_rate},  // Real hit rate from ThunderChunkStorage
-            {"l2_chunks", total_chunks},        // Real chunk count
-            {"l2_usage_bytes", l2_bytes},       // Real L2 (memory) usage
-            {"l3_chunks", total_chunks},        // Same as l2_chunks (total across both tiers)
-            {"l3_usage_bytes", l3_bytes}        // Real L3 (disk) usage
+            {"l2_hit_rate", storage_hit_rate},
+            {"l2_chunks", l2_chunk_count},
+            {"l2_usage_bytes", l2_bytes},
+            {"l2_limit_bytes", l2_limit},
+            {"l2_utilization", l2_utilization},
+            {"l3_chunks", l3_chunk_count},
+            {"l3_usage_bytes", l3_bytes},
+            {"l3_limit_bytes", l3_limit},
+            {"l3_utilization", l3_utilization},
+            {"total_chunks", total_chunks},
+            {"l2_to_l3_evictions", l2_to_l3_evictions},
+            {"l3_permanent_evictions", l3_permanent_evictions},
+            {"freq_protected_saves", freq_protected_saves}
         });
+
+        return res;
+    };
+
+    this->post_lmcache_warm = [this](const server_http_req & req) {
+        auto res = create_response();
+
+        // Parse top_n from request body (default 50)
+        size_t top_n = 50;
+        if (!req.body.empty()) {
+            try {
+                auto body = nlohmann::json::parse(req.body);
+                if (body.contains("top_n")) {
+                    top_n = body["top_n"].get<size_t>();
+                }
+            } catch (...) {
+                // Ignore parse errors, use default
+            }
+        }
+
+        auto * ctx = ctx_server.get_ctx();
+        if (ctx) {
+            llama_lmcache_prefetch_hot(ctx, top_n);
+            res->ok({{"status", "ok"}, {"prefetched_top_n", top_n}});
+        } else {
+            res->ok({{"status", "error"}, {"message", "no context available"}});
+        }
 
         return res;
     };

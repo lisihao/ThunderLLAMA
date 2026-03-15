@@ -311,6 +311,30 @@ inline bool thunderllama_config_load_and_apply(common_params & params, const std
         setenv("THUNDERLLAMA_CHUNK_PREFILL", "1", 1);
     }
 
+    // LMCACHE_L2_SIZE_GB (default 8)
+    std::string l2_size = config.get("LMCACHE_L2_SIZE_GB");
+    if (!l2_size.empty()) {
+        setenv("LMCACHE_L2_SIZE_GB", l2_size.c_str(), 1);
+    }
+
+    // LMCACHE_L3_SIZE_GB (default 256)
+    std::string l3_size = config.get("LMCACHE_L3_SIZE_GB");
+    if (!l3_size.empty()) {
+        setenv("LMCACHE_L3_SIZE_GB", l3_size.c_str(), 1);
+    }
+
+    // LMCACHE_FREQ_PROTECT threshold (default 5)
+    std::string freq_protect = config.get("LMCACHE_FREQ_PROTECT");
+    if (!freq_protect.empty()) {
+        setenv("LMCACHE_FREQ_PROTECT", freq_protect.c_str(), 1);
+    }
+
+    // LMCACHE_TTL_HOURS (default 0 = infinite)
+    std::string ttl_hours = config.get("LMCACHE_TTL_HOURS");
+    if (!ttl_hours.empty()) {
+        setenv("LMCACHE_TTL_HOURS", ttl_hours.c_str(), 1);
+    }
+
     // GGML_METAL_MAX_BUFFER_SIZE
     std::string metal_buffer = config.get("METAL_MAX_BUFFER_SIZE");
     if (!metal_buffer.empty()) {

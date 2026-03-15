@@ -1214,6 +1214,16 @@ void llama_get_lmcache_stats(
     ctx->get_lmcache_stats(total_prefills, skip_count, approx_skip_count);
 }
 
+// Trigger LMCache cache warm
+void llama_lmcache_prefetch_hot(
+    struct llama_context * ctx,
+    size_t top_n
+) {
+    if (ctx) {
+        ctx->lmcache_prefetch_hot(top_n);
+    }
+}
+
 // Get LMCache chunk storage statistics (Task 2.3)
 void llama_get_chunk_storage_stats(
     const struct llama_context * ctx,
@@ -1231,5 +1241,32 @@ void llama_get_chunk_storage_stats(
     }
 
     ctx->get_chunk_storage_stats(total_chunks, l2_usage_bytes, l3_usage_bytes, hit_rate);
+}
+
+// Get LMCache extended storage statistics (Task 9)
+void llama_get_chunk_storage_stats_ext(
+    const struct llama_context * ctx,
+    uint64_t * l2_chunk_count,
+    uint64_t * l3_chunk_count,
+    uint64_t * l2_limit,
+    uint64_t * l3_limit,
+    uint64_t * l2_to_l3_evictions,
+    uint64_t * l3_permanent_evictions,
+    uint64_t * freq_protected_saves
+) {
+    if (!ctx) {
+        if (l2_chunk_count) *l2_chunk_count = 0;
+        if (l3_chunk_count) *l3_chunk_count = 0;
+        if (l2_limit) *l2_limit = 0;
+        if (l3_limit) *l3_limit = 0;
+        if (l2_to_l3_evictions) *l2_to_l3_evictions = 0;
+        if (l3_permanent_evictions) *l3_permanent_evictions = 0;
+        if (freq_protected_saves) *freq_protected_saves = 0;
+        return;
+    }
+
+    ctx->get_chunk_storage_stats(nullptr, nullptr, nullptr, nullptr,
+                                 l2_chunk_count, l3_chunk_count, l2_limit, l3_limit,
+                                 l2_to_l3_evictions, l3_permanent_evictions, freq_protected_saves);
 }
 
